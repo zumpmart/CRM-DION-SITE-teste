@@ -1,0 +1,105 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile extending Firebase Auth",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "VENDEDOR", "SUPERVISOR"] },
+        "daily_goal": { "type": "number" },
+        "commission": { "type": "number" },
+        "status": { "type": "string", "enum": ["ATIVO", "INATIVO"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "username", "role", "status"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "A lead or sale record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "service": { "type": "string" },
+        "value": { "type": "number" },
+        "status": { "type": "string", "enum": ["AGUARDANDO", "PAGO", "PENDENTE", "CANCELADO"] },
+        "vendedor_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "paid_at": { "type": "string", "format": "date-time" },
+        "receipt_id": { "type": "string" }
+      },
+      "required": ["name", "phone", "service", "value", "status", "vendedor_id"]
+    },
+    "Receipt": {
+      "title": "Receipt",
+      "description": "A payment receipt",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sale_id": { "type": "string" },
+        "vendedor_id": { "type": "string" },
+        "file_name": { "type": "string" },
+        "file_path": { "type": "string" },
+        "status": { "type": "string", "enum": ["ENVIADO", "CONFERIDO", "PAGO"] },
+        "value": { "type": "number" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sale_id", "vendedor_id", "file_name", "file_path", "status", "value"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Audit log for actions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "user_name": { "type": "string" },
+        "action": { "type": "string" },
+        "target_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["user_id", "user_name", "action"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Payment to a vendedor",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "vendedor_id": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string" },
+        "admin_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["vendedor_id", "amount", "status", "admin_id"]
+    }
+  },
+  "firestore": {
+    "/profiles/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles"
+    },
+    "/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Sales and leads"
+    },
+    "/receipts/{receiptId}": {
+      "schema": { "$ref": "#/entities/Receipt" },
+      "description": "Receipts"
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Audit logs"
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/Payment" },
+      "description": "Payments"
+    }
+  }
+}
