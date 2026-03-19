@@ -26,22 +26,24 @@ import {
   History,
   PieChart,
   ShieldCheck,
-  Upload,
   Edit2,
   Calendar,
   Camera,
   List,
   Trash2,
   MessageCircle,
-  CalendarDays
+  CalendarDays,
+  Database,
+  Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper from 'react-easy-crop';
 import 'react-easy-crop/react-easy-crop.css';
 import { UserProfile, UserRole, Sale, SaleStatus, Receipt, ReceiptStatus, AuditLog, Payment } from './types';
-import { db, auth, storage } from './firebase';
-import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, limit } from 'firebase/firestore';
-import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, updatePassword, EmailAuthProvider, reauthenticateWithCredential } from 'firebase/auth';
+import { db, auth, storage, firebaseConfig } from './firebase';
+import { initializeApp } from 'firebase/app';
+import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, limit, or } from 'firebase/firestore';
+import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, updatePassword, EmailAuthProvider, reauthenticateWithCredential, getAuth as getSecondaryAuth } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
 // --- Components ---
@@ -119,6 +121,16 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [showUserModal, setShowUserModal] = useState(false);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    requireInput?: string;
+    onConfirm: () => void;
+    onCancel?: () => void;
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [editingSale, setEditingSale] = useState<Sale | null>(null);
@@ -224,7 +236,14 @@ export default function App() {
         return;
       }
 
-      setCurrentUser({ ...(docSnap.data() as UserProfile), id: docSnap.id });
+      const profileData = docSnap.data() as UserProfile;
+      if (profileData.status === 'INATIVO') {
+        setLoginError('Sua conta foi desativada pelo administrador.');
+        signOut(auth);
+        return;
+      }
+
+      setCurrentUser({ ...profileData, id: docSnap.id });
     } catch (err: any) {
       console.error('Fetch profile exception:', err);
       setLoginError('Erro ao carregar perfil: ' + err.message);
@@ -238,8 +257,30 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
 
-    let salesQ = query(collection(db, 'sales'), orderBy('created_at', 'desc'));
-    let receiptsQ = query(collection(db, 'receipts'), orderBy('created_at', 'desc'));
+    const isAdminOrManager = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE;
+    
+    let salesQ;
+    let receiptsQ;
+
+    if (isAdminOrManager) {
+      salesQ = query(collection(db, 'sales'), orderBy('created_at', 'desc'));
+      receiptsQ = query(collection(db, 'receipts'), orderBy('created_at', 'desc'));
+    } else {
+      // For Vendedor, fetch only their sales or sales transferred to them
+      salesQ = query(
+        collection(db, 'sales'), 
+        or(
+          where('vendedor_id', '==', currentUser.id),
+          where('transfer_to', '==', currentUser.id)
+        ),
+        orderBy('created_at', 'desc')
+      );
+      receiptsQ = query(
+        collection(db, 'receipts'), 
+        where('vendedor_id', '==', currentUser.id),
+        orderBy('created_at', 'desc')
+      );
+    }
 
     const unsubSales = onSnapshot(salesQ, (snapshot) => {
       const salesData = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }))
@@ -398,16 +439,30 @@ export default function App() {
   const mySales = useMemo(() => {
     return sales.filter(sale => {
       if (sale.status === SaleStatus.DELETED) return false;
-      if (currentUser?.role !== UserRole.ADMIN && currentUser?.role !== UserRole.SUPERVISOR && currentUser?.role !== UserRole.GERENTE) {
-        if (sale.vendedor_id !== currentUser?.id && sale.transfer_to !== currentUser?.id) {
+      
+      const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR || currentUser?.role === UserRole.GERENTE;
+      if (!isAdminOrManager) {
+        const isOwner = sale.vendedor_id === currentUser?.id;
+        const isTransferredToMe = sale.transfer_to === currentUser?.id;
+        if (!isOwner && !isTransferredToMe) {
           return false;
         }
       }
+
       const matchVendedor = !filters.vendedor || sale.vendedor_id === filters.vendedor;
       const matchStatus = !filters.status || sale.status === filters.status;
-      const saleDate = new Date(sale.created_at);
-      const matchStartDate = !filters.startDate || saleDate >= new Date(filters.startDate + 'T00:00:00');
-      const matchEndDate = !filters.endDate || saleDate <= new Date(filters.endDate + 'T23:59:59');
+      
+      let matchStartDate = true;
+      let matchEndDate = true;
+      if (filters.startDate || filters.endDate) {
+        const saleDate = new Date(sale.created_at);
+        if (filters.startDate) {
+          matchStartDate = saleDate >= new Date(filters.startDate + 'T00:00:00');
+        }
+        if (filters.endDate) {
+          matchEndDate = saleDate <= new Date(filters.endDate + 'T23:59:59');
+        }
+      }
       
       return matchVendedor && matchStatus && matchStartDate && matchEndDate;
     }).map(sale => {
@@ -662,6 +717,42 @@ export default function App() {
     }
   };
 
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !currentUser) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const csv = event.target?.result as string;
+      const lines = csv.split('\n');
+      
+      let importedCount = 0;
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        const values = lines[i].split(',');
+        
+        try {
+          await addDoc(collection(db, 'sales'), {
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            vendedor_id: currentUser.id,
+            name: values[2]?.replace(/"/g, '') || 'Cliente Importado',
+            phone: values[3]?.replace(/"/g, '') || '',
+            service: values[4]?.replace(/"/g, '') || '',
+            value: Number(values[5]?.replace(/"/g, '')) || 0,
+            status: SaleStatus.AGUARDANDO
+          });
+          importedCount++;
+        } catch (err) {
+          console.error('Erro ao importar linha', i, err);
+        }
+      }
+      alert(`${importedCount} leads importados com sucesso!`);
+      if (e.target) e.target.value = ''; // Reset input
+    };
+    reader.readAsText(file);
+  };
+
   const handleExport = () => {
     const csvContent = [
       ['Data', 'Vendedor', 'Nome', 'WhatsApp', 'Serviço', 'Valor', 'Status', 'Data Retorno'],
@@ -903,6 +994,55 @@ export default function App() {
     }
   };
 
+  const handleDeleteUser = async (userId: string) => {
+    if (window.confirm('Tem certeza que deseja excluir este usuário permanentemente? Esta ação não pode ser desfeita e pode afetar o histórico de vendas.')) {
+      try {
+        await deleteDoc(doc(db, 'profiles', userId));
+        await addLog(currentUser, `Excluiu o usuário ${userId}`, userId);
+        alert('Usuário excluído com sucesso!');
+      } catch (error) {
+        console.error('Erro ao excluir usuário:', error);
+        alert('Erro ao excluir usuário. Verifique suas permissões.');
+      }
+    }
+  };
+
+  const handleResetDatabase = async () => {
+    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    
+    setConfirmInput('');
+    setConfirmModal({
+      title: 'Limpar Dados de Teste',
+      message: 'ATENÇÃO: Você está prestes a apagar TODOS os leads, vendas, comprovantes, pagamentos e logs do sistema. Esta ação NÃO pode ser desfeita.',
+      requireInput: 'APAGAR TUDO',
+      confirmText: 'Apagar Tudo',
+      onConfirm: async () => {
+        setIsSubmitting(true);
+        try {
+          const salesSnap = await getDocs(collection(db, 'sales'));
+          for (const d of salesSnap.docs) await deleteDoc(doc(db, 'sales', d.id));
+
+          const receiptsSnap = await getDocs(collection(db, 'receipts'));
+          for (const d of receiptsSnap.docs) await deleteDoc(doc(db, 'receipts', d.id));
+
+          const paymentsSnap = await getDocs(collection(db, 'payments'));
+          for (const d of paymentsSnap.docs) await deleteDoc(doc(db, 'payments', d.id));
+
+          const logsSnap = await getDocs(collection(db, 'audit_logs'));
+          for (const d of logsSnap.docs) await deleteDoc(doc(db, 'audit_logs', d.id));
+
+          await addLog(currentUser, 'Resetou o banco de dados (apagou vendas, comprovantes, pagamentos e logs)', currentUser.id);
+          alert('Banco de dados limpo com sucesso!');
+        } catch (error: any) {
+          console.error('Erro ao limpar banco de dados:', error);
+          alert('Erro ao limpar banco: ' + error.message);
+        } finally {
+          setIsSubmitting(false);
+        }
+      }
+    });
+  };
+
   const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>, targetUserId: string) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1117,9 +1257,14 @@ export default function App() {
     setIsSubmitting(true);
 
     try {
-      // 1. Create Auth User
-      const userCredential = await createUserWithEmailAndPassword(auth, userData.email, userData.password);
+      // 1. Create Auth User using a secondary app to avoid logging out the admin
+      const secondaryApp = initializeApp(firebaseConfig, 'SecondaryApp');
+      const secondaryAuth = getSecondaryAuth(secondaryApp);
+      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, userData.email, userData.password);
       const user = userCredential.user;
+      
+      // Sign out from the secondary app immediately
+      await signOut(secondaryAuth);
 
       // 2. Create Profile
       await setDoc(doc(db, 'profiles', user.uid), {
@@ -1250,8 +1395,9 @@ export default function App() {
     { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN, UserRole.GERENTE] },
     { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN, UserRole.GERENTE] },
+    { id: 'data-hub', label: 'Central de Dados', icon: Database, roles: [UserRole.ADMIN, UserRole.GERENTE] },
     { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN, UserRole.GERENTE] },
-    { id: 'trash', label: 'Lixeira', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
   ];
 
@@ -1515,6 +1661,7 @@ export default function App() {
                                       sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
                                       sale.status === SaleStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
                                       sale.status === SaleStatus.CANCELADO ? 'bg-red-100 text-red-600' :
+                                      sale.status === SaleStatus.ARQUIVADO ? 'bg-zinc-200 text-zinc-700' :
                                       sale.status === SaleStatus.EXCLUSAO_SOLICITADA ? 'bg-zinc-800 text-zinc-100' :
                                       'bg-zinc-100 text-zinc-600'
                                     }`}>
@@ -1721,8 +1868,8 @@ export default function App() {
                                   className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                                 >
                                   <option value="">Todos</option>
-                                  {Object.values(SaleStatus).map(s => (
-                                    <option key={s} value={s}>{s}</option>
+                                  {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => (
+                                    <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>
                                   ))}
                                 </select>
                               </div>
@@ -1793,11 +1940,12 @@ export default function App() {
                                       sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
                                       sale.status === SaleStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
                                       sale.status === SaleStatus.CANCELADO ? 'bg-red-100 text-red-600' :
+                                      sale.status === SaleStatus.ARQUIVADO ? 'bg-zinc-200 text-zinc-700' :
                                       sale.status === SaleStatus.EXCLUSAO_SOLICITADA ? 'bg-zinc-800 text-zinc-100' :
                                       'bg-zinc-100 text-zinc-600'
                                     }`}
                                   >
-                                    {Object.values(SaleStatus).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
+                                    {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
                                   </select>
                                   {sale.transfer_to && sale.transfer_to !== currentUser?.id && (
                                     <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit">
@@ -1906,7 +2054,32 @@ export default function App() {
                   ) : (
                     <div className="p-6 overflow-x-auto">
                       <div className="flex gap-6 min-w-max pb-4">
-                        {Object.values(SaleStatus).map(status => (
+                        {Object.values(SaleStatus).filter(status => status !== SaleStatus.DELETED).map(status => {
+                          const statusSales = mySales.filter(s => {
+                            if (s.status !== status) return false;
+                            
+                            // Hide PAGO after 24h
+                            if (status === SaleStatus.PAGO && s.paid_at) {
+                              const hours = (new Date().getTime() - new Date(s.paid_at).getTime()) / 3600000;
+                              if (hours > 24) return false;
+                            }
+                            
+                            // Hide ARQUIVADO after 24h
+                            if (status === SaleStatus.ARQUIVADO) {
+                              const hours = (new Date().getTime() - new Date(s.updated_at).getTime()) / 3600000;
+                              if (hours > 24) return false;
+                            }
+                            
+                            // Hide CANCELADO after 24h
+                            if (status === SaleStatus.CANCELADO) {
+                              const hours = (new Date().getTime() - new Date(s.updated_at).getTime()) / 3600000;
+                              if (hours > 24) return false;
+                            }
+                            
+                            return true;
+                          });
+
+                          return (
                           <div 
                             key={status} 
                             className="w-80 bg-zinc-50 rounded-2xl border border-black/5 flex flex-col max-h-[calc(100vh-300px)]"
@@ -1916,11 +2089,11 @@ export default function App() {
                             <div className="p-4 border-b border-black/5 flex justify-between items-center bg-white rounded-t-2xl">
                               <h4 className="font-bold text-sm text-zinc-700">{status === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : status}</h4>
                               <span className="bg-zinc-100 text-zinc-500 text-xs font-bold px-2 py-1 rounded-full">
-                                {mySales.filter(s => s.status === status).length}
+                                {statusSales.length}
                               </span>
                             </div>
                             <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-3">
-                              {mySales.filter(s => s.status === status).map(sale => (
+                              {statusSales.map(sale => (
                                 <div 
                                   key={sale.id}
                                   draggable
@@ -1974,7 +2147,8 @@ export default function App() {
                               ))}
                             </div>
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -2058,13 +2232,25 @@ export default function App() {
                 <div className="space-y-6">
                   <div className="flex justify-between items-center">
                     <h3 className="text-2xl font-bold text-zinc-900">Gestão de Equipe</h3>
-                    <button 
-                      onClick={() => setShowUserModal(true)}
-                      className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
-                    >
-                      <PlusCircle className="w-5 h-5" />
-                      Novo Usuário
-                    </button>
+                    <div className="flex gap-4">
+                      {currentUser.role === UserRole.ADMIN && (
+                        <button 
+                          onClick={handleResetDatabase}
+                          disabled={isSubmitting}
+                          className="bg-red-100 text-red-600 px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-red-200 transition-all"
+                        >
+                          <Trash2 className="w-5 h-5" />
+                          Limpar Dados de Teste
+                        </button>
+                      )}
+                      <button 
+                        onClick={() => setShowUserModal(true)}
+                        className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100"
+                      >
+                        <PlusCircle className="w-5 h-5" />
+                        Novo Usuário
+                      </button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {users.map(user => (
@@ -2109,19 +2295,98 @@ export default function App() {
                             Editar Perfil
                           </button>
                           {user.id !== currentUser.id && (
-                            <button 
-                              onClick={() => {
-                                const newStatus = user.status === 'ATIVO' ? 'INATIVO' : 'ATIVO';
-                                handleUpdateUser(user.id, { status: newStatus });
-                              }}
-                              className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${user.status === 'ATIVO' ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
-                            >
-                              {user.status === 'ATIVO' ? 'Desativar' : 'Ativar'}
-                            </button>
+                            <>
+                              <button 
+                                onClick={() => {
+                                  setConfirmInput('');
+                                  setConfirmModal({
+                                    title: user.status === 'ATIVO' ? 'Desativar Usuário' : 'Ativar Usuário',
+                                    message: `Tem certeza que deseja ${user.status === 'ATIVO' ? 'desativar' : 'ativar'} este usuário?`,
+                                    confirmText: user.status === 'ATIVO' ? 'Desativar' : 'Ativar',
+                                    onConfirm: () => {
+                                      const newStatus = user.status === 'ATIVO' ? 'INATIVO' : 'ATIVO';
+                                      handleUpdateUser(user.id, { status: newStatus });
+                                    }
+                                  });
+                                }}
+                                className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${user.status === 'ATIVO' ? 'bg-amber-50 text-amber-600 hover:bg-amber-100' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
+                              >
+                                {user.status === 'ATIVO' ? 'Desativar' : 'Ativar'}
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setConfirmInput('');
+                                  setConfirmModal({
+                                    title: 'Excluir Usuário',
+                                    message: 'ATENÇÃO: Excluir este usuário fará com que todas as vendas dele fiquem sem dono (Desconhecido). Recomendamos DESATIVAR o usuário em vez de excluir. Tem certeza absoluta que deseja EXCLUIR?',
+                                    confirmText: 'Excluir',
+                                    onConfirm: async () => {
+                                      try {
+                                        await deleteDoc(doc(db, 'profiles', user.id));
+                                        await addLog(currentUser, `Excluiu permanentemente o usuário ${user.name}`, user.id);
+                                        alert('Usuário excluído com sucesso.');
+                                      } catch (err: any) {
+                                        alert('Erro ao excluir usuário: ' + err.message);
+                                      }
+                                    }
+                                  });
+                                }}
+                                className="flex-1 py-2 bg-red-50 text-red-600 rounded-xl text-xs font-bold hover:bg-red-100 transition-all"
+                              >
+                                Excluir
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {currentPage === 'data-hub' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                  <div className="p-6 border-b border-black/5">
+                    <h3 className="font-bold text-zinc-900">Central de Dados</h3>
+                    <p className="text-zinc-500 text-sm mt-1">Importe ou exporte todos os leads do sistema.</p>
+                  </div>
+                  <div className="p-6 flex flex-col gap-6">
+                    <div className="bg-zinc-50 p-6 rounded-2xl border border-black/5 flex flex-col gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
+                          <Upload className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-zinc-900">Importar Leads (CSV)</h4>
+                          <p className="text-sm text-zinc-500">Faça o upload de uma planilha CSV com os leads. Eles serão atribuídos a você.</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <label className="cursor-pointer bg-indigo-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-indigo-700 transition-colors">
+                          Selecionar Arquivo CSV
+                          <input type="file" accept=".csv" className="hidden" onChange={handleImport} />
+                        </label>
+                        <p className="text-xs text-zinc-400">Formato esperado: Data, Vendedor, Nome, WhatsApp, Serviço, Valor, Status</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-50 p-6 rounded-2xl border border-black/5 flex flex-col gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center">
+                          <Database className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-zinc-900">Exportar Leads (CSV)</h4>
+                          <p className="text-sm text-zinc-500">Baixe uma planilha com todos os leads filtrados atualmente.</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={handleExport}
+                        className="w-fit bg-emerald-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-emerald-700 transition-colors"
+                      >
+                        Baixar Planilha
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2312,7 +2577,6 @@ export default function App() {
                             <button 
                               onClick={() => {
                                 setEditingSale(sale);
-                                setShowModal(true);
                               }}
                               className="p-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
                             >
@@ -2447,37 +2711,60 @@ export default function App() {
               )}
               {currentPage === 'trash' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
-                  <h3 className="text-2xl font-bold text-zinc-900 mb-6">Lixeira</h3>
+                  <h3 className="text-2xl font-bold text-zinc-900 mb-6">Aprovações de Exclusão</h3>
                   <div className="space-y-4">
-                    {sales.filter(s => s.status === SaleStatus.DELETED).length === 0 ? (
-                      <p className="text-zinc-500 text-center py-8">A lixeira está vazia.</p>
+                    {sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).length === 0 ? (
+                      <p className="text-zinc-500 text-center py-8">Nenhuma solicitação de exclusão pendente.</p>
                     ) : (
-                      sales.filter(s => s.status === SaleStatus.DELETED).map(sale => (
+                      sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).map(sale => (
                         <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
                           <div className="flex flex-col gap-1">
                             <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
-                            <span className="text-sm text-zinc-500">{sale.service} - {new Date(sale.deleted_at || sale.updated_at).toLocaleDateString('pt-BR')}</span>
+                            <span className="text-sm text-zinc-500">{sale.service} - Solicitado em {new Date(sale.updated_at).toLocaleDateString('pt-BR')}</span>
                           </div>
-                          <button 
-                            onClick={async () => {
-                              if (window.confirm('Deseja restaurar esta venda?')) {
-                                try {
-                                  await updateDoc(doc(db, 'sales', sale.id), {
-                                    status: sale.previous_status || SaleStatus.AGUARDANDO,
-                                    updated_at: new Date().toISOString()
-                                  });
-                                  await addLog(currentUser, `Restaurou venda ${sale.id} da lixeira`, sale.id);
-                                  alert('Venda restaurada com sucesso!');
-                                } catch (error) {
-                                  console.error(error);
-                                  alert('Erro ao restaurar venda.');
+                          <div className="flex gap-2">
+                            <button 
+                              onClick={async () => {
+                                if (window.confirm('Deseja aprovar a exclusão desta venda?')) {
+                                  try {
+                                    await updateDoc(doc(db, 'sales', sale.id), {
+                                      status: SaleStatus.DELETED,
+                                      deleted_at: new Date().toISOString(),
+                                      updated_at: new Date().toISOString()
+                                    });
+                                    await addLog(currentUser, `Aprovou exclusão da venda ${sale.id}`, sale.id);
+                                    alert('Exclusão aprovada com sucesso!');
+                                  } catch (error) {
+                                    console.error(error);
+                                    alert('Erro ao aprovar exclusão.');
+                                  }
                                 }
-                              }
-                            }}
-                            className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors font-medium text-sm"
-                          >
-                            Restaurar
-                          </button>
+                              }}
+                              className="px-4 py-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors font-medium text-sm"
+                            >
+                              Aprovar Exclusão
+                            </button>
+                            <button 
+                              onClick={async () => {
+                                if (window.confirm('Deseja rejeitar a exclusão e restaurar esta venda?')) {
+                                  try {
+                                    await updateDoc(doc(db, 'sales', sale.id), {
+                                      status: sale.previous_status || SaleStatus.AGUARDANDO,
+                                      updated_at: new Date().toISOString()
+                                    });
+                                    await addLog(currentUser, `Rejeitou exclusão da venda ${sale.id}`, sale.id);
+                                    alert('Venda restaurada com sucesso!');
+                                  } catch (error) {
+                                    console.error(error);
+                                    alert('Erro ao restaurar venda.');
+                                  }
+                                }
+                              }}
+                              className="px-4 py-2 bg-zinc-100 text-zinc-600 rounded-xl hover:bg-zinc-200 transition-colors font-medium text-sm"
+                            >
+                              Rejeitar
+                            </button>
+                          </div>
                         </div>
                       ))
                     )}
@@ -2938,7 +3225,7 @@ export default function App() {
                         required 
                         className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
                       >
-                        {Object.values(SaleStatus).map(s => <option key={s} value={s}>{s}</option>)}
+                        {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
                       </select>
                     </div>
                   </div>
@@ -3264,6 +3551,55 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {confirmModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-black/5"
+          >
+            <h3 className="text-2xl font-bold text-zinc-900 mb-4">{confirmModal.title}</h3>
+            <p className="text-zinc-600 mb-6">{confirmModal.message}</p>
+            
+            {confirmModal.requireInput && (
+              <div className="mb-6">
+                <label className="block text-sm font-semibold text-zinc-700 mb-2">
+                  Digite "{confirmModal.requireInput}" para confirmar:
+                </label>
+                <input
+                  type="text"
+                  value={confirmInput}
+                  className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all"
+                  onChange={(e) => setConfirmInput(e.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  if (confirmModal.onCancel) confirmModal.onCancel();
+                  setConfirmModal(null);
+                }}
+                className="px-6 py-3 rounded-xl font-bold text-zinc-600 hover:bg-zinc-100 transition-all"
+              >
+                {confirmModal.cancelText || 'Cancelar'}
+              </button>
+              <button
+                disabled={!!confirmModal.requireInput && confirmInput !== confirmModal.requireInput}
+                onClick={() => {
+                  confirmModal.onConfirm();
+                  setConfirmModal(null);
+                }}
+                className="px-6 py-3 rounded-xl font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {confirmModal.confirmText || 'Confirmar'}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

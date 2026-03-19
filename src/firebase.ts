@@ -3,7 +3,7 @@ import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyDHSny0bDEVnLY_mp_LHool7G5OXREvMIM",
   authDomain: "crm-dion.firebaseapp.com",
   projectId: "crm-dion",
