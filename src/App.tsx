@@ -29,7 +29,11 @@ import {
   Upload,
   Edit2,
   Calendar,
-  Camera
+  Camera,
+  List,
+  Trash2,
+  MessageCircle,
+  CalendarDays
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper from 'react-easy-crop';
@@ -129,6 +133,9 @@ export default function App() {
     endDate: ''
   });
   const [showFilters, setShowFilters] = useState(false);
+  const [viewMode, setViewMode] = useState<'list' | 'kanban'>('kanban');
+  const [remarketingSaleId, setRemarketingSaleId] = useState<string | null>(null);
+  const [remarketingDate, setRemarketingDate] = useState<string>('');
   const [deletingSaleId, setDeletingSaleId] = useState<string | null>(null);
   const [transferringSale, setTransferringSale] = useState<Sale | null>(null);
   const [transferTargetId, setTransferTargetId] = useState<string>('');
@@ -267,7 +274,7 @@ export default function App() {
     let unsubLogs: any;
     let unsubPayments: any;
 
-    if (currentUser.role === UserRole.ADMIN) {
+    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) {
       unsubProfiles = onSnapshot(collection(db, 'profiles'), (snapshot) => {
         setUsers(snapshot.docs.map(doc => ({ ...(doc.data() as UserProfile), id: doc.id })));
       });
@@ -297,7 +304,7 @@ export default function App() {
 
   // --- Background Cleanup Routine ---
   useEffect(() => {
-    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
 
     const runCleanup = async () => {
       try {
@@ -315,15 +322,6 @@ export default function App() {
           const receiptsToDelete = receiptsSnapshot.docs.filter(d => oldPaidSaleIds.includes(d.data().sale_id));
 
           for (const receiptDoc of receiptsToDelete) {
-            const data = receiptDoc.data() as Receipt;
-            if (data.file_path) {
-              try {
-                const fileRef = ref(storage, data.file_path);
-                await deleteObject(fileRef);
-              } catch (e) {
-                console.error("Erro ao excluir arquivo do comprovante de venda:", e);
-              }
-            }
             await deleteDoc(doc(db, 'receipts', receiptDoc.id));
           }
         }
@@ -399,9 +397,9 @@ export default function App() {
 
   const mySales = useMemo(() => {
     return sales.filter(sale => {
-      if (currentUser?.role !== UserRole.ADMIN && currentUser?.role !== UserRole.SUPERVISOR) {
-        const authUid = auth.currentUser?.uid || currentUser?.id;
-        if (sale.vendedor_id !== authUid && sale.transfer_to !== authUid) {
+      if (sale.status === SaleStatus.DELETED) return false;
+      if (currentUser?.role !== UserRole.ADMIN && currentUser?.role !== UserRole.SUPERVISOR && currentUser?.role !== UserRole.GERENTE) {
+        if (sale.vendedor_id !== currentUser?.id && sale.transfer_to !== currentUser?.id) {
           return false;
         }
       }
@@ -488,23 +486,26 @@ export default function App() {
       [SaleStatus.CANCELADO]: createdInRange.filter(s => s.status === SaleStatus.CANCELADO).length,
     };
 
+    const conversionRate = createdInRange.length > 0 ? (createdInRange.filter(s => s.status === SaleStatus.PAGO).length / createdInRange.length) * 100 : 0;
+
     return {
       dailyTotal,
       monthlyTotal,
       dailyCount: createdInRange.length,
       statusCounts,
+      conversionRate,
       goalProgress: currentUser?.daily_goal ? (dailyTotal / currentUser.daily_goal) * 100 : 0
     };
   }, [mySales, currentUser, dateRange]);
 
   const adminGoalTracking = useMemo(() => {
-    if (currentUser?.role !== UserRole.ADMIN) return [];
+    if (currentUser?.role !== UserRole.ADMIN && currentUser?.role !== UserRole.GERENTE) return [];
     
     const start = dateRange.start || getLocalISODate();
     const end = dateRange.end || getLocalISODate();
     
     return users
-      .filter(u => u.role === UserRole.VENDEDOR || u.role === UserRole.ADMIN)
+      .filter(u => u.role !== UserRole.SUPERVISOR)
       .map(u => {
         const sellerSales = sales.filter(s => {
           if (s.vendedor_id !== u.id || s.status !== SaleStatus.PAGO || !s.paid_at) return false;
@@ -586,7 +587,17 @@ export default function App() {
         await handleUploadReceipt(saleId, newReceipt);
       }
 
-      await addLog(currentUser, `Editou venda ${saleId}`, saleId);
+      let changes = [];
+      if (sale) {
+        if ('name' in updatedData && sale.name !== updatedData.name) changes.push(`Nome: ${sale.name || 'Vazio'} -> ${updatedData.name}`);
+        if ('phone' in updatedData && sale.phone !== updatedData.phone) changes.push(`Telefone: ${sale.phone} -> ${updatedData.phone}`);
+        if ('service' in updatedData && sale.service !== updatedData.service) changes.push(`Serviço: ${sale.service} -> ${updatedData.service}`);
+        if ('value' in updatedData && sale.value !== updatedData.value) changes.push(`Valor: R$ ${sale.value} -> R$ ${updatedData.value}`);
+        if ('status' in updatedData && sale.status !== updatedData.status) changes.push(`Status: ${sale.status} -> ${updatedData.status}`);
+      }
+      const changeString = changes.length > 0 ? ` (${changes.join(', ')})` : '';
+
+      await addLog(currentUser, `Editou venda ${saleId}${changeString}`, saleId);
       setEditingSale(null);
     } catch (error: any) {
       alert('Erro ao editar venda: ' + error.message);
@@ -595,7 +606,23 @@ export default function App() {
     }
   };
 
-  const handleUpdateStatus = async (saleId: string, newStatus: SaleStatus, forceUpdate: boolean = false) => {
+  const handleDragStart = (e: React.DragEvent, saleId: string) => {
+    e.dataTransfer.setData('saleId', saleId);
+  };
+
+  const handleDrop = async (e: React.DragEvent, newStatus: SaleStatus) => {
+    e.preventDefault();
+    const saleId = e.dataTransfer.getData('saleId');
+    if (saleId) {
+      await handleUpdateStatus(saleId, newStatus);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleUpdateStatus = async (saleId: string, newStatus: SaleStatus, forceUpdate: boolean = false, returnDate?: string) => {
     if (!currentUser) return;
     
     const sale = sales.find(s => s.id === saleId);
@@ -603,6 +630,12 @@ export default function App() {
     
     if (newStatus === SaleStatus.PAGO && !hasReceipt && !forceUpdate) {
       setSalePendingReceipt(sale || null);
+      return;
+    }
+
+    if (newStatus === SaleStatus.REMARKETING && !returnDate) {
+      setRemarketingSaleId(saleId);
+      setRemarketingDate(getLocalISODate());
       return;
     }
 
@@ -614,13 +647,45 @@ export default function App() {
     if (newStatus === SaleStatus.PAGO) {
       updates.paid_at = new Date().toISOString();
     }
+    
+    if (newStatus === SaleStatus.REMARKETING && returnDate) {
+      updates.return_date = returnDate;
+    } else if (newStatus !== SaleStatus.REMARKETING) {
+      updates.return_date = null;
+    }
 
     try {
       await updateDoc(doc(db, 'sales', saleId), updates);
-      await addLog(currentUser, `Alterou status da venda ${saleId} para ${newStatus}`, saleId);
+      await addLog(currentUser, `Alterou status da venda ${saleId} de ${sale?.status} para ${newStatus}`, saleId);
     } catch (error: any) {
       alert('Erro ao atualizar status: ' + error.message);
     }
+  };
+
+  const handleExport = () => {
+    const csvContent = [
+      ['Data', 'Vendedor', 'Nome', 'WhatsApp', 'Serviço', 'Valor', 'Status', 'Data Retorno'],
+      ...mySales.map(sale => [
+        new Date(sale.created_at).toLocaleDateString(),
+        users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido',
+        sale.name || 'Cliente',
+        sale.phone,
+        sale.service,
+        sale.value.toString(),
+        sale.status,
+        sale.return_date ? new Date(sale.return_date).toLocaleDateString() : ''
+      ])
+    ].map(row => row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(",")).join("\n");
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `vendas_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleDeleteSale = async (saleId: string | null) => {
@@ -631,22 +696,16 @@ export default function App() {
       const sale = sales.find(s => s.id === saleId);
       if (!sale) return;
 
-      if (currentUser.role === UserRole.ADMIN) {
-        const receipt = receipts.find(r => r.sale_id === saleId);
-        if (receipt) {
-          if (receipt.file_path) {
-            try {
-              const fileRef = ref(storage, receipt.file_path);
-              await deleteObject(fileRef);
-            } catch (e) {
-              console.error("Erro ao excluir arquivo do comprovante:", e);
-            }
-          }
-          await deleteDoc(doc(db, 'receipts', receipt.id));
-        }
-        await deleteDoc(doc(db, 'sales', saleId));
-        await addLog(currentUser, `Excluiu venda ${saleId}`, saleId);
-        alert('Exclusão confirmada!');
+      if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE) {
+        await updateDoc(doc(db, 'sales', saleId), {
+          status: SaleStatus.DELETED,
+          previous_status: sale.status,
+          deleted_at: new Date().toISOString(),
+          deleted_by: currentUser.id,
+          updated_at: new Date().toISOString()
+        });
+        await addLog(currentUser, `Moveu venda ${saleId} para lixeira`, saleId);
+        alert('Venda movida para a lixeira!');
       } else {
         await updateDoc(doc(db, 'sales', saleId), {
           status: SaleStatus.EXCLUSAO_SOLICITADA,
@@ -666,7 +725,7 @@ export default function App() {
   };
 
   const handleRejectDeletion = async (sale: Sale) => {
-    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR && currentUser.role !== UserRole.GERENTE)) return;
     try {
       const restoredStatus = sale.previous_status || SaleStatus.PENDENTE;
       await updateDoc(doc(db, 'sales', sale.id), {
@@ -752,7 +811,7 @@ export default function App() {
   };
 
   const handleMarkReceiptAsPaid = async (receiptId: string) => {
-    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    if (!currentUser || currentUser.role === UserRole.VENDEDOR) return;
 
     const receipt = receipts.find(r => r.id === receiptId);
     if (!receipt) return;
@@ -771,7 +830,7 @@ export default function App() {
   };
 
   const handleUpdateUser = async (userId: string, updates: Partial<UserProfile>) => {
-    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
 
     try {
       await updateDoc(doc(db, 'profiles', userId), updates);
@@ -917,7 +976,7 @@ export default function App() {
   };
 
   const handlePayVendedor = async (vendedorId: string, amount: number) => {
-    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
 
     if (selectedSalesToPay.length === 0) {
       alert('Selecione pelo menos uma venda para pagar.');
@@ -1054,7 +1113,7 @@ export default function App() {
   };
 
   const handleCreateUser = async (userData: any) => {
-    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
     setIsSubmitting(true);
 
     try {
@@ -1183,15 +1242,17 @@ export default function App() {
   }
 
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
-    { id: 'sales', label: currentUser.role === UserRole.VENDEDOR ? 'Minhas Vendas' : 'Todas as Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
-    { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
-    { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
-    { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN] },
-    { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN] },
-    { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN] },
-    { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'sales', label: currentUser.role === UserRole.VENDEDOR ? 'Minhas Vendas' : 'Todas as Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN, UserRole.GERENTE] },
+    { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN, UserRole.GERENTE] },
+    { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN, UserRole.GERENTE] },
+    { id: 'trash', label: 'Lixeira', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
   ];
 
   return (
@@ -1296,7 +1357,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
                     <StatCard 
                       title="Faturamento no Período" 
                       value={`R$ ${stats.dailyTotal.toLocaleString()}`} 
@@ -1317,6 +1378,13 @@ export default function App() {
                       icon={Users} 
                       color="bg-amber-500"
                       subtitle={`Novos leads no período selecionado`}
+                    />
+                    <StatCard 
+                      title="Taxa de Conversão" 
+                      value={`${stats.conversionRate.toFixed(1)}%`} 
+                      icon={Target} 
+                      color="bg-blue-500"
+                      subtitle={`Leads convertidos em vendas pagas`}
                     />
                     <StatCard 
                       title="Ranking Atual" 
@@ -1374,7 +1442,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {currentUser.role === UserRole.ADMIN && adminGoalTracking.length > 0 && (
+                      {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && adminGoalTracking.length > 0 && (
                         <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5">
                           <div className="flex items-center gap-3 mb-6">
                             <Target className="w-6 h-6 text-indigo-600" />
@@ -1605,7 +1673,19 @@ export default function App() {
                               Limpar
                             </button>
                           )}
-                          <button className="px-4 py-2 bg-indigo-600 rounded-xl text-sm font-semibold text-white hover:bg-indigo-700 transition-all">Exportar</button>
+                          <button 
+                            onClick={() => setViewMode(viewMode === 'list' ? 'kanban' : 'list')}
+                            className="px-4 py-2 bg-zinc-100 rounded-xl text-sm font-semibold text-zinc-600 hover:bg-zinc-200 transition-all flex items-center gap-2"
+                          >
+                            {viewMode === 'list' ? <LayoutDashboard className="w-4 h-4" /> : <List className="w-4 h-4" />}
+                            {viewMode === 'list' ? 'Kanban' : 'Lista'}
+                          </button>
+                          <button 
+                            onClick={handleExport}
+                            className="px-4 py-2 bg-indigo-600 rounded-xl text-sm font-semibold text-white hover:bg-indigo-700 transition-all"
+                          >
+                            Exportar
+                          </button>
                         </div>
                       </div>
 
@@ -1669,148 +1749,235 @@ export default function App() {
                         )}
                       </AnimatePresence>
                     </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left">
-                      <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
-                        <tr>
-                          <th className="px-6 py-4 font-semibold">Data</th>
-                          {currentUser.role !== UserRole.VENDEDOR && <th className="px-6 py-4 font-semibold">Vendedor</th>}
-                          <th className="px-6 py-4 font-semibold">WhatsApp</th>
-                          <th className="px-6 py-4 font-semibold">Serviço</th>
-                          <th className="px-6 py-4 font-semibold">Valor</th>
-                          <th className="px-6 py-4 font-semibold">Status</th>
-                          <th className="px-6 py-4 font-semibold">Ações</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-black/5">
-                        {mySales.map((sale) => (
-                          <tr key={sale.id} className="hover:bg-zinc-50 transition-all">
-                            <td className="px-6 py-4 text-sm text-zinc-500">{new Date(sale.created_at).toLocaleDateString()}</td>
-                            {currentUser.role !== UserRole.VENDEDOR && (
-                              <td className="px-6 py-4 text-sm font-medium text-zinc-900">
-                                {users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido'}
-                              </td>
-                            )}
-                            <td className="px-6 py-4">
-                              <p className="font-bold text-zinc-900">{sale.phone}</p>
-                              <p className="text-[10px] text-zinc-400">Criado: {new Date(sale.created_at).toLocaleDateString()}</p>
-                            </td>
-                            <td className="px-6 py-4 text-sm text-zinc-600">{sale.service}</td>
-                            <td className="px-6 py-4">
-                              <p className="font-bold text-zinc-900">R$ {sale.value.toLocaleString()}</p>
-                              {sale.paid_at && (
-                                <p className="text-[10px] text-emerald-600 font-medium">Pago: {new Date(sale.paid_at).toLocaleDateString()}</p>
-                              )}
-                            </td>
-                            <td className="px-6 py-4">
-                              <div className="flex flex-col gap-1">
-                                <select 
-                                  value={sale.status}
-                                  onChange={(e) => handleUpdateStatus(sale.id, e.target.value as SaleStatus)}
-                                  disabled={(sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role !== UserRole.ADMIN) || sale.transfer_to !== undefined && sale.transfer_to !== null}
-                                  className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase outline-none cursor-pointer w-fit ${
-                                    sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
-                                    sale.status === SaleStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
-                                    sale.status === SaleStatus.CANCELADO ? 'bg-red-100 text-red-600' :
-                                    sale.status === SaleStatus.EXCLUSAO_SOLICITADA ? 'bg-zinc-800 text-zinc-100' :
-                                    'bg-zinc-100 text-zinc-600'
-                                  }`}
-                                >
-                                  {Object.values(SaleStatus).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
-                                </select>
-                                {sale.transfer_to && sale.transfer_to !== currentUser?.id && (
-                                  <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit">
-                                    Aguardando aceite
-                                  </span>
-                                )}
-                                {sale.transfer_to === currentUser?.id && (
-                                  <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full w-fit">
-                                    Transferência recebida
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <div className="flex gap-2">
-                                {!sale.receipt_id ? (
-                                  <div className="relative">
-                                    <input 
-                                      type="file" 
-                                      className="absolute inset-0 opacity-0 cursor-pointer z-20"
-                                      onChange={(e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) handleUploadReceipt(sale.id, file);
-                                      }}
-                                    />
-                                    <button 
-                                      className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-all"
-                                      title="Enviar Comprovante"
-                                    >
-                                      <Upload className="w-4 h-4" />
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <button 
-                                    onClick={() => {
-                                      const receipt = receipts.find(r => r.sale_id === sale.id);
-                                      if (receipt) handleViewReceipt(receipt.file_path);
-                                    }}
-                                    className="flex items-center gap-1 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-lg hover:bg-emerald-100 transition-all text-xs font-bold"
-                                    title="Ver Comprovante"
-                                  >
-                                    <FileText className="w-3.5 h-3.5" />
-                                     Comprovante
-
-                                  </button>
-                                )}
-                                {sale.transfer_to === currentUser?.id ? (
-                                  <>
-                                    <button onClick={() => handleAcceptTransfer(sale)} className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-all" title="Aceitar Transferência">
-                                      <CheckCircle className="w-4 h-4" />
-                                    </button>
-                                    <button onClick={() => handleRejectTransfer(sale)} className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-all" title="Recusar Transferência">
-                                      <XCircle className="w-4 h-4" />
-                                    </button>
-                                  </>
-                                ) : sale.transfer_to ? (
-                                  <button onClick={() => handleCancelTransfer(sale)} className="p-2 hover:bg-zinc-100 text-zinc-500 rounded-lg transition-all" title="Cancelar Transferência">
-                                    <X className="w-4 h-4" />
-                                  </button>
-                                ) : (
-                                  <>
-                                    <button onClick={() => setEditingSale(sale)} className="p-2 hover:bg-zinc-100 text-zinc-500 rounded-lg transition-all" title="Editar">
-                                      <Edit2 className="w-4 h-4" />
-                                    </button>
-                                    <button onClick={() => setTransferringSale(sale)} className="p-2 hover:bg-blue-50 text-blue-600 rounded-lg transition-all" title="Transferir Lead">
-                                      <ArrowRightLeft className="w-4 h-4" />
-                                    </button>
-                                    {sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role === UserRole.ADMIN && (
-                                      <>
-                                        <button 
-                                          onClick={() => setDeletingSaleId(sale.id)}
-                                          className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-all"
-                                          title="Aprovar Exclusão"
-                                        >
-                                          <CheckCircle className="w-4 h-4" />
-                                        </button>
-                                        <button 
-                                          onClick={() => handleRejectDeletion(sale)}
-                                          className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-all"
-                                          title="Rejeitar Exclusão"
-                                        >
-                                          <XCircle className="w-4 h-4" />
-                                        </button>
-                                      </>
-                                    )}
-                                  </>
-                                )}
-                              </div>
-                            </td>
+                  {viewMode === 'list' ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                          <tr>
+                            <th className="px-6 py-4 font-semibold">Data</th>
+                            {currentUser.role !== UserRole.VENDEDOR && <th className="px-6 py-4 font-semibold">Vendedor</th>}
+                            <th className="px-6 py-4 font-semibold">WhatsApp</th>
+                            <th className="px-6 py-4 font-semibold">Serviço</th>
+                            <th className="px-6 py-4 font-semibold">Valor</th>
+                            <th className="px-6 py-4 font-semibold">Status</th>
+                            <th className="px-6 py-4 font-semibold">Ações</th>
                           </tr>
+                        </thead>
+                        <tbody className="divide-y divide-black/5">
+                          {mySales.map((sale) => (
+                            <tr key={sale.id} className="hover:bg-zinc-50 transition-all">
+                              <td className="px-6 py-4 text-sm text-zinc-500">{new Date(sale.created_at).toLocaleDateString()}</td>
+                              {currentUser.role !== UserRole.VENDEDOR && (
+                                <td className="px-6 py-4 text-sm font-medium text-zinc-900">
+                                  {users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido'}
+                                </td>
+                              )}
+                              <td className="px-6 py-4">
+                                <p className="font-bold text-zinc-900">{sale.phone}</p>
+                                <p className="text-[10px] text-zinc-400">Criado: {new Date(sale.created_at).toLocaleDateString()}</p>
+                              </td>
+                              <td className="px-6 py-4 text-sm text-zinc-600">{sale.service}</td>
+                              <td className="px-6 py-4">
+                                <p className="font-bold text-zinc-900">R$ {sale.value.toLocaleString()}</p>
+                                {sale.paid_at && (
+                                  <p className="text-[10px] text-emerald-600 font-medium">Pago: {new Date(sale.paid_at).toLocaleDateString()}</p>
+                                )}
+                              </td>
+                              <td className="px-6 py-4">
+                                <div className="flex flex-col gap-1">
+                                  <select 
+                                    value={sale.status}
+                                    onChange={(e) => handleUpdateStatus(sale.id, e.target.value as SaleStatus)}
+                                    disabled={(sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE && currentUser.role !== UserRole.SUPERVISOR) || sale.transfer_to !== undefined && sale.transfer_to !== null}
+                                    className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase outline-none cursor-pointer w-fit ${
+                                      sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
+                                      sale.status === SaleStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
+                                      sale.status === SaleStatus.CANCELADO ? 'bg-red-100 text-red-600' :
+                                      sale.status === SaleStatus.EXCLUSAO_SOLICITADA ? 'bg-zinc-800 text-zinc-100' :
+                                      'bg-zinc-100 text-zinc-600'
+                                    }`}
+                                  >
+                                    {Object.values(SaleStatus).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
+                                  </select>
+                                  {sale.transfer_to && sale.transfer_to !== currentUser?.id && (
+                                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit">
+                                      Aguardando aceite
+                                    </span>
+                                  )}
+                                  {sale.transfer_to === currentUser?.id && (
+                                    <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full w-fit">
+                                      Transferência recebida
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-6 py-4">
+                                <div className="flex gap-2">
+                                  {!sale.receipt_id ? (
+                                    <div className="relative">
+                                      <input 
+                                        type="file" 
+                                        className="absolute inset-0 opacity-0 cursor-pointer z-20"
+                                        onChange={(e) => {
+                                          const file = e.target.files?.[0];
+                                          if (file) handleUploadReceipt(sale.id, file);
+                                        }}
+                                      />
+                                      <button 
+                                        className="p-2 hover:bg-indigo-50 text-indigo-600 rounded-lg transition-all"
+                                        title="Enviar Comprovante"
+                                      >
+                                        <Upload className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button 
+                                      onClick={() => {
+                                        const receipt = receipts.find(r => r.sale_id === sale.id);
+                                        if (receipt) handleViewReceipt(receipt.file_path);
+                                      }}
+                                      className="flex items-center gap-1 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-lg hover:bg-emerald-100 transition-all text-xs font-bold"
+                                      title="Ver Comprovante"
+                                    >
+                                      <FileText className="w-3.5 h-3.5" />
+                                       Comprovante
+                                    </button>
+                                  )}
+                                  {sale.transfer_to === currentUser?.id ? (
+                                    <>
+                                      <button onClick={() => handleAcceptTransfer(sale)} className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-all" title="Aceitar Transferência">
+                                        <CheckCircle className="w-4 h-4" />
+                                      </button>
+                                      <button onClick={() => handleRejectTransfer(sale)} className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-all" title="Recusar Transferência">
+                                        <XCircle className="w-4 h-4" />
+                                      </button>
+                                    </>
+                                  ) : sale.transfer_to ? (
+                                    <button onClick={() => handleCancelTransfer(sale)} className="p-2 hover:bg-zinc-100 text-zinc-500 rounded-lg transition-all" title="Cancelar Transferência">
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  ) : (
+                                    <>
+                                      <a 
+                                        href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="p-2 hover:bg-green-50 text-green-600 rounded-lg transition-all"
+                                        title="Chamar no WhatsApp"
+                                      >
+                                        <MessageCircle className="w-4 h-4" />
+                                      </a>
+                                      {!(sale.status === SaleStatus.PAGO && currentUser.role === UserRole.VENDEDOR) && (
+                                        <button onClick={() => setEditingSale(sale)} className="p-2 hover:bg-zinc-100 text-zinc-500 rounded-lg transition-all" title="Editar">
+                                          <Edit2 className="w-4 h-4" />
+                                        </button>
+                                      )}
+                                      <button onClick={() => setTransferringSale(sale)} className="p-2 hover:bg-blue-50 text-blue-600 rounded-lg transition-all" title="Transferir Lead">
+                                        <ArrowRightLeft className="w-4 h-4" />
+                                      </button>
+                                      {sale.status === SaleStatus.EXCLUSAO_SOLICITADA && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || currentUser.role === UserRole.SUPERVISOR) && (
+                                        <>
+                                          <button 
+                                            onClick={() => handleDeleteSale(sale.id)}
+                                            disabled={deletingSaleId === sale.id}
+                                            className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-all disabled:opacity-50"
+                                            title="Aprovar Exclusão"
+                                          >
+                                            {deletingSaleId === sale.id ? <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+                                          </button>
+                                          <button 
+                                            onClick={() => handleRejectDeletion(sale)}
+                                            className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-all"
+                                            title="Rejeitar Exclusão"
+                                          >
+                                            <XCircle className="w-4 h-4" />
+                                          </button>
+                                        </>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="p-6 overflow-x-auto">
+                      <div className="flex gap-6 min-w-max pb-4">
+                        {Object.values(SaleStatus).map(status => (
+                          <div 
+                            key={status} 
+                            className="w-80 bg-zinc-50 rounded-2xl border border-black/5 flex flex-col max-h-[calc(100vh-300px)]"
+                            onDragOver={handleDragOver}
+                            onDrop={(e) => handleDrop(e, status)}
+                          >
+                            <div className="p-4 border-b border-black/5 flex justify-between items-center bg-white rounded-t-2xl">
+                              <h4 className="font-bold text-sm text-zinc-700">{status === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : status}</h4>
+                              <span className="bg-zinc-100 text-zinc-500 text-xs font-bold px-2 py-1 rounded-full">
+                                {mySales.filter(s => s.status === status).length}
+                              </span>
+                            </div>
+                            <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-3">
+                              {mySales.filter(s => s.status === status).map(sale => (
+                                <div 
+                                  key={sale.id}
+                                  draggable
+                                  onDragStart={(e) => handleDragStart(e, sale.id)}
+                                  className="bg-white p-4 rounded-xl border border-black/5 shadow-sm hover:shadow-md transition-all cursor-grab active:cursor-grabbing flex flex-col gap-3"
+                                >
+                                  <div className="flex justify-between items-start">
+                                    <div>
+                                      <p className="font-bold text-zinc-900">{sale.phone}</p>
+                                      <p className="text-xs text-zinc-500">{sale.service}</p>
+                                    </div>
+                                    <span className="font-bold text-emerald-600 text-sm">R$ {sale.value.toLocaleString()}</span>
+                                  </div>
+                                  {sale.return_date && status === SaleStatus.REMARKETING && (
+                                    <div className="flex items-center gap-1 text-xs font-medium text-amber-600 bg-amber-50 px-2 py-1 rounded-lg w-fit">
+                                      <Calendar className="w-3 h-3" />
+                                      Retorno: {new Date(sale.return_date).toLocaleDateString()}
+                                    </div>
+                                  )}
+                                  <div className="flex justify-between items-center pt-2 border-t border-black/5">
+                                    <span className="text-[10px] text-zinc-400 font-medium">
+                                      {new Date(sale.created_at).toLocaleDateString()}
+                                    </span>
+                                    <div className="flex items-center gap-2">
+                                      {currentUser.role !== UserRole.VENDEDOR && (
+                                        <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">
+                                          {users.find(u => u.id === sale.vendedor_id)?.name?.split(' ')[0] || 'Desconhecido'}
+                                        </span>
+                                      )}
+                                      <a 
+                                        href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="p-1.5 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors"
+                                        title="Chamar no WhatsApp"
+                                      >
+                                        <MessageCircle className="w-3 h-3" />
+                                      </a>
+                                      {!(sale.status === SaleStatus.PAGO && currentUser.role === UserRole.VENDEDOR) && (
+                                        <button 
+                                          onClick={() => setEditingSale(sale)}
+                                          className="p-1.5 bg-zinc-50 text-zinc-500 rounded-lg hover:bg-zinc-100 transition-colors"
+                                          title="Editar"
+                                        >
+                                          <Edit2 className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
                         ))}
-                      </tbody>
-                    </table>
-                  </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1828,11 +1995,11 @@ export default function App() {
                           <th className="px-6 py-4 font-semibold">Arquivo</th>
                           <th className="px-6 py-4 font-semibold">Valor</th>
                           <th className="px-6 py-4 font-semibold">Status</th>
-                          {currentUser.role === UserRole.ADMIN && <th className="px-6 py-4 font-semibold">Ações</th>}
+                          {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && <th className="px-6 py-4 font-semibold">Ações</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-black/5">
-                        {receipts.filter(r => currentUser.role === UserRole.ADMIN || r.vendedor_id === currentUser.id).map((receipt) => (
+                        {receipts.filter(r => currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || r.vendedor_id === currentUser.id).map((receipt) => (
                           <tr key={receipt.id} className="hover:bg-zinc-50 transition-all">
                             <td className="px-6 py-4 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleDateString()}</td>
                             <td className="px-6 py-4 text-sm font-medium text-zinc-900">{users.find(u => u.id === receipt.vendedor_id)?.name}</td>
@@ -1847,7 +2014,7 @@ export default function App() {
                             </td>
                             <td className="px-6 py-4 font-bold text-zinc-900">R$ {receipt.value.toLocaleString()}</td>
                             <td className="px-6 py-4">
-                              {currentUser.role === UserRole.ADMIN ? (
+                              {currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE ? (
                                 <select 
                                   value={receipt.status}
                                   onChange={(e) => handleUpdateReceiptStatus(receipt.id, e.target.value as ReceiptStatus)}
@@ -1869,7 +2036,7 @@ export default function App() {
                                 </span>
                               )}
                             </td>
-                            {currentUser.role === UserRole.ADMIN && (
+                            {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
                               <td className="px-6 py-4">
                                 <button 
                                   onClick={() => handleViewReceipt(receipt.file_path)}
@@ -1887,7 +2054,7 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'users' && currentUser.role === UserRole.ADMIN && (
+              {currentPage === 'users' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
                 <div className="space-y-6">
                   <div className="flex justify-between items-center">
                     <h3 className="text-2xl font-bold text-zinc-900">Gestão de Equipe</h3>
@@ -1959,7 +2126,7 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'logs' && currentUser.role === UserRole.ADMIN && (
+              {currentPage === 'logs' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                   <div className="p-6 border-b border-black/5">
                     <h3 className="font-bold text-zinc-900">Logs de Auditoria</h3>
@@ -1989,7 +2156,7 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'financial' && currentUser.role === UserRole.ADMIN && (
+              {currentPage === 'financial' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
                 <div className="space-y-8">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="flex items-center gap-2 bg-white p-1 rounded-xl shadow-sm border border-black/5">
@@ -2119,6 +2286,46 @@ export default function App() {
                 </div>
               )}
 
+              {currentPage === 'calendar' && (
+                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
+                  <h3 className="text-2xl font-bold text-zinc-900 mb-6">Agenda de Remarketing</h3>
+                  <div className="space-y-4">
+                    {sales.filter(s => s.status === SaleStatus.REMARKETING && s.return_date).sort((a, b) => new Date(a.return_date!).getTime() - new Date(b.return_date!).getTime()).length === 0 ? (
+                      <p className="text-zinc-500 text-center py-8">Nenhum lead agendado para remarketing.</p>
+                    ) : (
+                      sales.filter(s => s.status === SaleStatus.REMARKETING && s.return_date).sort((a, b) => new Date(a.return_date!).getTime() - new Date(b.return_date!).getTime()).map(sale => (
+                        <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
+                          <div className="flex flex-col gap-1">
+                            <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
+                            <span className="text-sm text-zinc-500">{sale.service} - {new Date(sale.return_date!).toLocaleDateString('pt-BR')}</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <a 
+                              href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
+                              title="Chamar no WhatsApp"
+                            >
+                              <MessageCircle className="w-5 h-5" />
+                            </a>
+                            <button 
+                              onClick={() => {
+                                setEditingSale(sale);
+                                setShowModal(true);
+                              }}
+                              className="p-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
+                            >
+                              <Edit2 className="w-5 h-5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
               {currentPage === 'ranking' && (
                 <div className="max-w-4xl mx-auto space-y-8">
                   <div className="text-center">
@@ -2235,6 +2442,45 @@ export default function App() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+              )}
+              {currentPage === 'trash' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE) && (
+                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
+                  <h3 className="text-2xl font-bold text-zinc-900 mb-6">Lixeira</h3>
+                  <div className="space-y-4">
+                    {sales.filter(s => s.status === SaleStatus.DELETED).length === 0 ? (
+                      <p className="text-zinc-500 text-center py-8">A lixeira está vazia.</p>
+                    ) : (
+                      sales.filter(s => s.status === SaleStatus.DELETED).map(sale => (
+                        <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
+                          <div className="flex flex-col gap-1">
+                            <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
+                            <span className="text-sm text-zinc-500">{sale.service} - {new Date(sale.deleted_at || sale.updated_at).toLocaleDateString('pt-BR')}</span>
+                          </div>
+                          <button 
+                            onClick={async () => {
+                              if (window.confirm('Deseja restaurar esta venda?')) {
+                                try {
+                                  await updateDoc(doc(db, 'sales', sale.id), {
+                                    status: sale.previous_status || SaleStatus.AGUARDANDO,
+                                    updated_at: new Date().toISOString()
+                                  });
+                                  await addLog(currentUser, `Restaurou venda ${sale.id} da lixeira`, sale.id);
+                                  alert('Venda restaurada com sucesso!');
+                                } catch (error) {
+                                  console.error(error);
+                                  alert('Erro ao restaurar venda.');
+                                }
+                              }
+                            }}
+                            className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors font-medium text-sm"
+                          >
+                            Restaurar
+                          </button>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
               )}
@@ -2409,6 +2655,61 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Remarketing Modal */}
+      <AnimatePresence>
+        {remarketingSaleId && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-8"
+            >
+              <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Calendar className="w-8 h-8 text-amber-600" />
+              </div>
+              <h3 className="text-xl font-bold text-zinc-900 mb-2 text-center">Data de Retorno</h3>
+              <p className="text-zinc-500 mb-6 text-sm text-center">Selecione a data para retornar o contato com este cliente.</p>
+              
+              <div className="mb-8">
+                <input 
+                  type="date" 
+                  value={remarketingDate}
+                  onChange={(e) => setRemarketingDate(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => {
+                    setRemarketingSaleId(null);
+                    setRemarketingDate('');
+                  }}
+                  className="w-full px-6 py-3 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={() => {
+                    if (remarketingDate) {
+                      handleUpdateStatus(remarketingSaleId, SaleStatus.REMARKETING, false, remarketingDate);
+                      setRemarketingSaleId(null);
+                      setRemarketingDate('');
+                    } else {
+                      alert('Por favor, selecione uma data.');
+                    }
+                  }}
+                  className="w-full px-6 py-3 rounded-xl font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-all"
+                >
+                  Confirmar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Pending Receipt Modal */}
       <AnimatePresence>
         {salePendingReceipt && (
@@ -2485,7 +2786,7 @@ export default function App() {
                     className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
                   >
                     <option value="">Selecione...</option>
-                    {users.filter(u => u.id !== currentUser.id && (u.role === UserRole.VENDEDOR || u.role === UserRole.ADMIN)).map(u => (
+                    {users.filter(u => u.id !== currentUser.id).map(u => (
                       <option key={u.id} value={u.id}>{u.name}</option>
                     ))}
                   </select>
@@ -2534,7 +2835,7 @@ export default function App() {
                 Excluir Lead?
               </h3>
               <p className="text-zinc-500 mb-8">
-                {currentUser?.role === UserRole.ADMIN 
+                {currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.GERENTE || currentUser?.role === UserRole.SUPERVISOR 
                   ? 'Esta ação não pode ser desfeita. Todos os dados deste lead serão removidos permanentemente.'
                   : 'O administrador será notificado e precisará aprovar a exclusão deste lead.'}
               </p>

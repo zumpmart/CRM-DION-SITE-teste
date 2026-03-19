@@ -1,15 +1,18 @@
 export enum UserRole {
   ADMIN = "ADMIN",
-  VENDEDOR = "VENDEDOR",
+  GERENTE = "GERENTE",
   SUPERVISOR = "SUPERVISOR",
+  VENDEDOR = "VENDEDOR",
 }
 
 export enum SaleStatus {
   AGUARDANDO = "AGUARDANDO",
-  PAGO = "PAGO",
   PENDENTE = "PENDENTE",
+  REMARKETING = "REMARKETING",
+  PAGO = "PAGO",
   CANCELADO = "CANCELADO",
   EXCLUSAO_SOLICITADA = "EXCLUSAO_SOLICITADA",
+  DELETED = "DELETED",
 }
 
 export enum ReceiptStatus {
@@ -42,11 +45,14 @@ export interface Sale {
   previous_status?: SaleStatus;
   vendedor_id: string;
   transfer_to?: string | null;
+  return_date?: string;
   created_at: string;
   updated_at: string;
   paid_at?: string;
   commission_paid?: boolean;
   receipt_id?: string; // Virtual field or joined
+  deleted_at?: string;
+  deleted_by?: string;
 }
 
 export interface Receipt {
