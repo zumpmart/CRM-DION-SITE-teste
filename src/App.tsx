@@ -413,10 +413,14 @@ export default function App() {
         mergeSales();
       }, (error) => handleSyncError(error, 'Vendas Transferidas'));
 
+      // For ranking, use all PAGO sales - but only listen, don't block on index errors
       unsubRankingSales = onSnapshot(salesQ3, (snapshot) => {
         rankingSalesRef.current = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
         mergeSales();
-      }, (error) => handleSyncError(error, 'Ranking'));
+      }, (error) => {
+        console.warn('Ranking query requires a Firestore index. Ranking may only show your own sales.', error);
+        // Don't call handleSyncError - ranking will work with the user's own sales
+      });
 
       const receiptsQ = query(collection(db, 'receipts'), where('vendedor_id', '==', currentUser.id));
       unsubReceipts = onSnapshot(receiptsQ, (snapshot) => {
@@ -621,7 +625,7 @@ export default function App() {
           total: userSales.reduce((acc, s) => acc + s.value, 0)
         };
       })
-      .filter(u => u.count > 0 || u.id === currentUser?.id) // Keep users with sales, or the current user so they always see themselves
+      .filter(u => u.count > 0 || true) // Always show all users in ranking
       .sort((a, b) => b.total - a.total);
     return stats;
   }, [sales, users, rankingFilter]);
@@ -3059,6 +3063,48 @@ export default function App() {
                         Baixar Planilha
                       </button>
                     </div>
+                    <div className="bg-indigo-50 p-6 rounded-2xl border border-indigo-200 flex flex-col gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
+                          <Upload className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-zinc-900">Restaurar Backup (JSON)</h4>
+                          <p className="text-sm text-zinc-500">Restaure vendas a partir de um arquivo de backup JSON gerado anteriormente.</p>
+                        </div>
+                      </div>
+                      <div className="relative w-fit">
+                        <input 
+                          type="file" 
+                          accept=".json"
+                          className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file || !currentUser) return;
+                            try {
+                              const text = await file.text();
+                              const data = JSON.parse(text);
+                              let count = 0;
+                              if (data.sales && Array.isArray(data.sales)) {
+                                for (const sale of data.sales) {
+                                  const { id, ...saleData } = sale;
+                                  await addDoc(collection(db, 'sales'), saleData);
+                                  count++;
+                                }
+                              }
+                              await addLog(currentUser, `Restaurou backup com ${count} vendas`);
+                              showToast(`Backup restaurado: ${count} vendas importadas!`, 'success');
+                            } catch (err: any) {
+                              showToast('Erro ao restaurar backup: ' + err.message, 'error');
+                            }
+                            if (e.target) e.target.value = '';
+                          }}
+                        />
+                        <button className="bg-indigo-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-indigo-700 transition-colors pointer-events-none">
+                          Selecionar Arquivo JSON
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3441,6 +3487,44 @@ export default function App() {
                       ))
                     )}
                   </div>
+
+                  <h3 className="text-2xl font-bold text-zinc-900 mt-8 mb-6 pt-6 border-t border-black/5">Lixeira (Excluídos)</h3>
+                  <div className="space-y-4">
+                    {sales.filter(s => s.status === SaleStatus.DELETED).length === 0 ? (
+                      <p className="text-zinc-500 text-center py-8">Nenhuma venda na lixeira.</p>
+                    ) : (
+                      sales.filter(s => s.status === SaleStatus.DELETED).map(sale => (
+                        <div key={sale.id} className="flex items-center justify-between p-4 border border-red-100 rounded-2xl hover:bg-red-50/30 transition-colors">
+                          <div className="flex flex-col gap-1">
+                            <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
+                            <span className="text-sm text-zinc-500">{sale.service} - R$ {sale.value.toLocaleString()} — Excluído em {sale.deleted_at ? new Date(sale.deleted_at).toLocaleDateString('pt-BR') : '-'}</span>
+                          </div>
+                          <button 
+                            onClick={async () => {
+                              if (window.confirm('Deseja restaurar esta venda da lixeira?')) {
+                                try {
+                                  await updateDoc(doc(db, 'sales', sale.id), {
+                                    status: sale.previous_status || SaleStatus.AGUARDANDO,
+                                    deleted_at: null,
+                                    deleted_by: null,
+                                    updated_at: new Date().toISOString()
+                                  });
+                                  await addLog(currentUser, `Restaurou venda ${sale.id} da lixeira`, sale.id);
+                                  showToast('Venda restaurada com sucesso!', 'success');
+                                } catch (error) {
+                                  console.error(error);
+                                  showToast('Erro ao restaurar venda.', 'error');
+                                }
+                              }
+                            }}
+                            className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-100 transition-colors font-medium text-sm"
+                          >
+                            Restaurar
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
               {currentPage === 'profile' && (
@@ -3694,9 +3778,10 @@ export default function App() {
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       if (file) {
+                        const pendingSaleId = salePendingReceipt.id;
                         setSalePendingReceipt(null);
-                        await handleUploadReceipt(salePendingReceipt.id, file);
-                        await handleUpdateStatus(salePendingReceipt.id, SaleStatus.PAGO, true);
+                        await handleUploadReceipt(pendingSaleId, file);
+                        await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
                       }
                     }}
                   />
@@ -4386,6 +4471,54 @@ export default function App() {
               >
                 Fechar Ficha
               </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {massTransferringUser && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white p-6 rounded-3xl shadow-xl max-w-md w-full border border-black/5 flex flex-col items-center text-center"
+          >
+            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mb-4">
+              <Briefcase className="w-8 h-8 text-indigo-600" />
+            </div>
+            <h3 className="text-xl font-bold text-zinc-900 mb-2">Transferência em Massa</h3>
+            <p className="text-zinc-600 text-sm mb-6">
+              Transfira toda a carteira ativa (vendas pendentes e contratos ativos) de <strong className="text-zinc-900">{massTransferringUser.name}</strong> para outro vendedor.
+            </p>
+            <div className="w-full space-y-4">
+              <div className="text-left w-full">
+                <label className="text-xs font-bold text-zinc-500 uppercase ml-1 mb-1 block">Vendedor Destino</label>
+                <select
+                  value={massTransferTargetId}
+                  onChange={(e) => setMassTransferTargetId(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
+                >
+                  <option value="">Selecione para quem transferir...</option>
+                  {users.filter(u => u.id !== massTransferringUser.id && u.status === 'ATIVO').map(u => (
+                    <option key={u.id} value={u.id}>{u.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button 
+                  onClick={() => setMassTransferringUser(null)}
+                  className="flex-1 px-4 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-bold rounded-xl transition-all"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={handleMassTransfer}
+                  disabled={!massTransferTargetId}
+                  className="flex-1 px-4 py-3 bg-indigo-600 disabled:bg-indigo-300 hover:bg-indigo-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-indigo-100 disabled:shadow-none"
+                >
+                  Transferir Tudo
+                </button>
+              </div>
             </div>
           </motion.div>
         </div>
