@@ -71,7 +71,7 @@ service cloud.firestore {
         isGerente() ||
         resource.data.vendedor_id == request.auth.uid
       );
-      allow create: if isAuthenticated() && request.resource.data.vendedor_id == request.auth.uid;
+      allow create: if isAuthenticated() && (request.resource.data.vendedor_id == request.auth.uid || isAdmin() || isSupervisor() || isGerente());
       allow update: if isAuthenticated() && (
         isAdmin() || 
         isSupervisor() || 

@@ -40,7 +40,9 @@ import {
   RefreshCw,
   Repeat,
   UserCheck,
-  Clock
+  Clock,
+  Plus,
+  Eye
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper from 'react-easy-crop';
@@ -227,6 +229,8 @@ export default function App() {
   const [customerVendorFilter, setCustomerVendorFilter] = useState<string>('');
   const [customerDateFrom, setCustomerDateFrom] = useState<string>('');
   const [customerDateTo, setCustomerDateTo] = useState<string>('');
+  const [duplicateCustomerFound, setDuplicateCustomerFound] = useState<Customer | null>(null);
+  const [pendingLeadData, setPendingLeadData] = useState<any>(null);
 
   const clearFilters = () => {
     setFilters({
@@ -865,22 +869,37 @@ export default function App() {
       // Check if customer already exists by phone
       const existingCustomer = customers.find(c => c.phone.replace(/\D/g, '') === normalizedPhone);
       
+      // If customer exists, show modal with options
+      if (existingCustomer) {
+        setDuplicateCustomerFound(existingCustomer);
+        setPendingLeadData(leadData);
+        return; // Wait for user choice in modal
+      }
+
+      // No existing customer, proceed normally
+      await proceedWithLead(leadData, null);
+    } catch (error: any) {
+      showToast('Erro ao salvar lead: ' + error.message, 'error');
+    }
+  };
+
+  const proceedWithLead = async (leadData: any, existingCustomer: Customer | null) => {
+    if (!currentUser) return;
+    try {
       let customerId: string;
       let isReturning = false;
 
       if (existingCustomer) {
         customerId = existingCustomer.id;
         isReturning = true;
-        // Update customer stats
         await updateDoc(doc(db, 'customers', customerId), {
           total_spent: (existingCustomer.total_spent || 0) + leadData.value,
           total_purchases: (existingCustomer.total_purchases || 0) + 1,
           services: [...new Set([...(existingCustomer.services || []), ...(leadData.services || [leadData.service])])],
           updated_at: new Date().toISOString(),
         });
-        showToast(`Cliente existente encontrado! (${existingCustomer.name}) — ${existingCustomer.total_purchases + 1}ª compra`, 'info');
+        showToast(`Venda adicionada ao cliente existente (${existingCustomer.name})`, 'success');
       } else {
-        // Create new customer
         const customerRef = await addDoc(collection(db, 'customers'), {
           name: leadData.name || leadData.phone,
           phone: leadData.phone,
@@ -906,13 +925,11 @@ export default function App() {
         updated_at: new Date().toISOString(),
       };
 
-      // Add recurring fields if applicable
       if (leadData.sale_type === SaleType.RECORRENTE) {
         saleData.billing_cycle = leadData.billing_cycle || 'mensal';
         saleData.contract_start = leadData.contract_start || new Date().toISOString().split('T')[0];
         saleData.contract_end = leadData.contract_end || '';
         saleData.contract_status = ContractStatus.ATIVO;
-        // Calculate next billing date
         const start = new Date(saleData.contract_start);
         if (leadData.billing_cycle === 'trimestral') start.setMonth(start.getMonth() + 3);
         else if (leadData.billing_cycle === 'semestral') start.setMonth(start.getMonth() + 6);
@@ -922,7 +939,6 @@ export default function App() {
       }
 
       const docRef = await addDoc(collection(db, 'sales'), saleData);
-
       await addLog(currentUser, `Registrou novo lead: ${leadData.phone}${isReturning ? ' (cliente retornante)' : ''}`, docRef.id);
       clearFilters();
       setTimeout(() => {
@@ -1491,8 +1507,7 @@ export default function App() {
       if (!sale) return;
 
       if (receipts.some(r => r.sale_id === saleId)) {
-        // If called from the pending receipt modal, skip duplicate check and just proceed
-        // The receipt already exists, so just return success
+        // Receipt already exists for this sale, skip
         return;
       }
 
@@ -1503,9 +1518,9 @@ export default function App() {
 
       const receiptRef = await addDoc(collection(db, 'receipts'), {
         sale_id: saleId,
-        vendedor_id: currentUser.id,
+        vendedor_id: sale.vendedor_id, // Use the SALE's vendor, not the current user
         file_name: file.name,
-        file_path: downloadURL, // Storing the URL instead of base64
+        file_path: downloadURL,
         status: ReceiptStatus.ENVIADO,
         value: sale.value || 0,
         created_at: new Date().toISOString()
@@ -1516,6 +1531,7 @@ export default function App() {
     } catch (err: any) {
       console.error('Erro no processo de upload:', err);
       showToast('Erro no upload: ' + err.message, 'error');
+      throw err; // Re-throw so the caller knows it failed
     }
   };
 
@@ -3843,8 +3859,13 @@ export default function App() {
                       if (file) {
                         const pendingSaleId = salePendingReceipt.id;
                         setSalePendingReceipt(null);
-                        await handleUploadReceipt(pendingSaleId, file);
-                        await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
+                        try {
+                          await handleUploadReceipt(pendingSaleId, file);
+                          await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
+                          showToast('Venda marcada como PAGA com sucesso!', 'success');
+                        } catch (err: any) {
+                          showToast('Erro ao processar comprovante: ' + err.message, 'error');
+                        }
                       }
                     }}
                   />
@@ -4582,6 +4603,89 @@ export default function App() {
                   Transferir Tudo
                 </button>
               </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {duplicateCustomerFound && pendingLeadData && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white p-6 rounded-3xl shadow-xl max-w-lg w-full border border-black/5"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
+                <AlertCircle className="w-6 h-6 text-amber-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-zinc-900">Cliente Já Cadastrado</h3>
+                <p className="text-sm text-zinc-500">Encontramos um cliente com este telefone na base.</p>
+              </div>
+            </div>
+
+            <div className="bg-zinc-50 p-4 rounded-2xl mb-6 border border-zinc-100">
+              <div className="flex justify-between items-center mb-2">
+                <span className="font-bold text-zinc-900">{duplicateCustomerFound.name}</span>
+                <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
+                  {duplicateCustomerFound.total_purchases} compra{duplicateCustomerFound.total_purchases !== 1 ? 's' : ''}
+                </span>
+              </div>
+              <p className="text-sm text-zinc-500">{duplicateCustomerFound.phone}</p>
+              <p className="text-sm text-zinc-500 mt-1">
+                LTV: <strong className="text-emerald-600">R$ {(duplicateCustomerFound.total_spent || 0).toLocaleString()}</strong>
+              </p>
+              {duplicateCustomerFound.services?.length > 0 && (
+                <div className="flex gap-1 mt-2 flex-wrap">
+                  {duplicateCustomerFound.services.map(s => (
+                    <span key={s} className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded text-[10px] font-bold">{s}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <button 
+                onClick={async () => {
+                  const customer = duplicateCustomerFound;
+                  const data = pendingLeadData;
+                  setDuplicateCustomerFound(null);
+                  setPendingLeadData(null);
+                  await proceedWithLead(data, customer);
+                }}
+                className="w-full px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-100 text-left flex items-center gap-3"
+              >
+                <Plus className="w-5 h-5 flex-shrink-0" />
+                <div>
+                  <span className="block">Adicionar Venda ao Cliente Existente</span>
+                  <span className="text-xs font-normal text-emerald-100">A nova venda será vinculada a {duplicateCustomerFound.name}</span>
+                </div>
+              </button>
+              <button 
+                onClick={() => {
+                  setViewingCustomer(duplicateCustomerFound);
+                  setDuplicateCustomerFound(null);
+                  setPendingLeadData(null);
+                  setCurrentPage('customers');
+                }}
+                className="w-full px-4 py-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold rounded-xl transition-all text-left flex items-center gap-3"
+              >
+                <Eye className="w-5 h-5 flex-shrink-0" />
+                <div>
+                  <span className="block">Ver Ficha do Cliente</span>
+                  <span className="text-xs font-normal text-indigo-400">Abrir a ficha completa antes de decidir</span>
+                </div>
+              </button>
+              <button 
+                onClick={() => {
+                  setDuplicateCustomerFound(null);
+                  setPendingLeadData(null);
+                }}
+                className="w-full px-4 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-600 font-medium rounded-xl transition-all text-center"
+              >
+                Cancelar
+              </button>
             </div>
           </motion.div>
         </div>
