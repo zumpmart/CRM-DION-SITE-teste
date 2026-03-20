@@ -1502,25 +1502,27 @@ export default function App() {
 
   const handleUploadReceipt = async (saleId: string, file: File) => {
     try {
-      if (!currentUser) return;
+      if (!currentUser) throw new Error('Usuário não autenticado');
       const sale = sales.find(s => s.id === saleId);
-      if (!sale) return;
+      if (!sale) throw new Error('Venda não encontrada');
 
       if (receipts.some(r => r.sale_id === saleId)) {
-        // Receipt already exists for this sale, skip
-        return;
+        return; // Receipt already exists
       }
 
-      // Upload to Firebase Storage
-      const storageRef = ref(storage, `receipts/${saleId}_${Date.now()}_${file.name}`);
-      await uploadBytes(storageRef, file);
-      const downloadURL = await getDownloadURL(storageRef);
+      // Convert file to base64 (stored directly in Firestore, no Storage needed)
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('Erro ao ler arquivo'));
+        reader.readAsDataURL(file);
+      });
 
       const receiptRef = await addDoc(collection(db, 'receipts'), {
         sale_id: saleId,
-        vendedor_id: sale.vendedor_id, // Use the SALE's vendor, not the current user
+        vendedor_id: sale.vendedor_id,
         file_name: file.name,
-        file_path: downloadURL,
+        file_path: base64,
         status: ReceiptStatus.ENVIADO,
         value: sale.value || 0,
         created_at: new Date().toISOString()
@@ -1531,7 +1533,7 @@ export default function App() {
     } catch (err: any) {
       console.error('Erro no processo de upload:', err);
       showToast('Erro no upload: ' + err.message, 'error');
-      throw err; // Re-throw so the caller knows it failed
+      throw err;
     }
   };
 
