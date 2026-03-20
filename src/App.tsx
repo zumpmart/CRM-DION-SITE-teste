@@ -3845,44 +3845,75 @@ export default function App() {
               <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <AlertCircle className="w-8 h-8 text-amber-600" />
               </div>
-              <h3 className="text-xl font-bold text-zinc-900 mb-2">Comprovante Necessário</h3>
-              <p className="text-zinc-500 mb-6 text-sm">Para marcar esta venda como PAGA, você precisa anexar o comprovante de pagamento.</p>
+              <h3 className="text-xl font-bold text-zinc-900 mb-2">Comprovante de Pagamento</h3>
+              <p className="text-zinc-500 mb-6 text-sm">Anexe o comprovante ou marque diretamente como pago.</p>
               
-              <div className="mb-8">
-                <div className="relative border-2 border-dashed border-zinc-200 rounded-2xl p-8 hover:border-indigo-500 transition-colors bg-zinc-50">
-                  <input 
-                    type="file" 
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20"
-                    accept="image/*,.pdf"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const pendingSaleId = salePendingReceipt.id;
-                        setSalePendingReceipt(null);
-                        try {
-                          await handleUploadReceipt(pendingSaleId, file);
-                          await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
-                          showToast('Venda marcada como PAGA com sucesso!', 'success');
-                        } catch (err: any) {
-                          showToast('Erro ao processar comprovante: ' + err.message, 'error');
-                        }
-                      }
-                    }}
-                  />
-                  <Upload className="w-8 h-8 text-zinc-400 mx-auto mb-3" />
-                  <p className="text-sm font-semibold text-zinc-700">Clique ou arraste o comprovante aqui</p>
-                  <p className="text-xs text-zinc-500 mt-1">Imagens ou PDF (máx. 5MB)</p>
+              {isUploadingReceipt ? (
+                <div className="py-8">
+                  <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
+                  <p className="text-sm font-semibold text-zinc-600">Enviando comprovante e atualizando status...</p>
                 </div>
-              </div>
+              ) : (
+                <>
+                  <div className="mb-6">
+                    <div className="relative border-2 border-dashed border-zinc-200 rounded-2xl p-8 hover:border-indigo-500 transition-colors bg-zinc-50">
+                      <input 
+                        type="file" 
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20"
+                        accept="image/*,.pdf"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file || !salePendingReceipt) return;
+                          const pendingSaleId = salePendingReceipt.id;
+                          setIsUploadingReceipt(true);
+                          try {
+                            await handleUploadReceipt(pendingSaleId, file);
+                            await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
+                            showToast('Venda marcada como PAGA com comprovante!', 'success');
+                            setSalePendingReceipt(null);
+                          } catch (err: any) {
+                            console.error('Comprovante upload error:', err);
+                            showToast('Erro: ' + err.message, 'error');
+                          } finally {
+                            setIsUploadingReceipt(false);
+                          }
+                        }}
+                      />
+                      <Upload className="w-8 h-8 text-zinc-400 mx-auto mb-3" />
+                      <p className="text-sm font-semibold text-zinc-700">Clique para anexar comprovante</p>
+                      <p className="text-xs text-zinc-500 mt-1">Imagens ou PDF (máx. 5MB)</p>
+                    </div>
+                  </div>
 
-              <div className="flex gap-3">
-                <button 
-                  onClick={() => setSalePendingReceipt(null)}
-                  className="w-full px-6 py-3 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
-                >
-                  Cancelar
-                </button>
-              </div>
+                  <div className="flex flex-col gap-3">
+                    <button 
+                      onClick={async () => {
+                        if (!salePendingReceipt) return;
+                        const pendingSaleId = salePendingReceipt.id;
+                        setIsUploadingReceipt(true);
+                        try {
+                          await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
+                          showToast('Venda marcada como PAGA (sem comprovante).', 'success');
+                          setSalePendingReceipt(null);
+                        } catch (err: any) {
+                          showToast('Erro ao atualizar status: ' + err.message, 'error');
+                        } finally {
+                          setIsUploadingReceipt(false);
+                        }
+                      }}
+                      className="w-full px-6 py-3 rounded-xl font-bold text-emerald-600 bg-emerald-50 hover:bg-emerald-100 transition-all"
+                    >
+                      Marcar como PAGO sem Comprovante
+                    </button>
+                    <button 
+                      onClick={() => setSalePendingReceipt(null)}
+                      className="w-full px-6 py-3 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </>
+              )}
             </motion.div>
           </div>
         )}
