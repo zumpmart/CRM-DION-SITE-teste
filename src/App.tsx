@@ -1852,6 +1852,28 @@ export default function App() {
           </div>
         </header>
 
+        {/* Cleanup Reminder Banner (every 15 days) */}
+        {currentUser.role === UserRole.ADMIN && (() => {
+          const lastCleanup = localStorage.getItem('lastCleanupDate');
+          const daysSince = lastCleanup ? Math.floor((Date.now() - new Date(lastCleanup).getTime()) / (1000 * 60 * 60 * 24)) : 999;
+          return daysSince >= 15 ? (
+            <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mx-4 mt-2 rounded-md shadow-sm flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-amber-600" />
+                <p className="text-sm text-amber-800 font-medium">
+                  🧹 Limpeza de dados pendente {daysSince === 999 ? '(nunca realizada)' : `(${daysSince} dias atrás)`}. Vá em <strong>Central de Dados</strong> para limpar comprovantes e logs antigos.
+                </p>
+              </div>
+              <button 
+                onClick={() => setCurrentPage('data-hub')}
+                className="text-xs font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 px-3 py-1 rounded-lg transition-colors whitespace-nowrap"
+              >
+                Ir para Limpeza
+              </button>
+            </div>
+          ) : null;
+        })()}
+
         {/* Sync Error Banner */}
         {syncError && (
           <div className="bg-red-50 border-l-4 border-red-500 p-4 m-4 rounded-md shadow-sm">
@@ -3186,14 +3208,85 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <div className="bg-red-50 p-6 rounded-2xl border border-red-200 flex flex-col gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-red-100 text-red-600 rounded-xl flex items-center justify-center">
+                          <Trash2 className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-zinc-900">Limpeza de Dados Antigos</h4>
+                          <p className="text-sm text-zinc-500">Remova comprovantes e logs com mais de 15 dias para liberar espaço.</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-3 flex-wrap">
+                        <button 
+                          onClick={async () => {
+                            const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+                            const oldReceipts = receipts.filter(r => r.created_at < cutoff);
+                            if (oldReceipts.length === 0) {
+                              showToast('Nenhum comprovante com mais de 15 dias encontrado.', 'info');
+                              return;
+                            }
+                            if (!window.confirm(`Deseja apagar ${oldReceipts.length} comprovante(s) com mais de 15 dias? Esta ação não pode ser desfeita.`)) return;
+                            try {
+                              for (const r of oldReceipts) {
+                                await deleteDoc(doc(db, 'receipts', r.id));
+                              }
+                              await addLog(currentUser, `Limpou ${oldReceipts.length} comprovantes antigos (>15 dias)`);
+                              localStorage.setItem('lastCleanupDate', new Date().toISOString());
+                              showToast(`${oldReceipts.length} comprovante(s) removido(s)!`, 'success');
+                            } catch (err: any) {
+                              showToast('Erro na limpeza: ' + err.message, 'error');
+                            }
+                          }}
+                          className="bg-red-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-red-700 transition-colors"
+                        >
+                          Limpar Comprovantes (+15 dias)
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+                            const oldLogs = logs.filter(l => l.created_at < cutoff);
+                            if (oldLogs.length === 0) {
+                              showToast('Nenhum log com mais de 15 dias encontrado.', 'info');
+                              return;
+                            }
+                            if (!window.confirm(`Deseja apagar ${oldLogs.length} log(s) com mais de 15 dias? Esta ação não pode ser desfeita.`)) return;
+                            try {
+                              for (const l of oldLogs) {
+                                await deleteDoc(doc(db, 'audit_logs', l.id));
+                              }
+                              localStorage.setItem('lastCleanupDate', new Date().toISOString());
+                              showToast(`${oldLogs.length} log(s) removido(s)!`, 'success');
+                            } catch (err: any) {
+                              showToast('Erro na limpeza: ' + err.message, 'error');
+                            }
+                          }}
+                          className="bg-orange-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-orange-700 transition-colors"
+                        >
+                          Limpar Logs (+15 dias)
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
 
               {currentPage === 'logs' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
-                  <div className="p-6 border-b border-black/5">
+                  <div className="p-6 border-b border-black/5 flex justify-between items-center">
                     <h3 className="font-bold text-zinc-900">Logs de Auditoria</h3>
+                    {(() => {
+                      const lastCleanup = localStorage.getItem('lastCleanupDate');
+                      const daysSince = lastCleanup ? Math.floor((Date.now() - new Date(lastCleanup).getTime()) / (1000 * 60 * 60 * 24)) : 999;
+                      return daysSince >= 15 ? (
+                        <span className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-full animate-pulse">
+                          ⚠️ Limpeza pendente ({daysSince === 999 ? 'nunca feita' : `${daysSince} dias`})
+                        </span>
+                      ) : (
+                        <span className="text-xs text-zinc-400">Próxima limpeza em {15 - daysSince} dia(s)</span>
+                      );
+                    })()}
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left">
