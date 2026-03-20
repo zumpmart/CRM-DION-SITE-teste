@@ -224,6 +224,9 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [croppedAreaPixels, setCroppedAreaPixels] = useState<any>(null);
   const [targetUserIdForPhoto, setTargetUserIdForPhoto] = useState<string | null>(null);
+  const [customerVendorFilter, setCustomerVendorFilter] = useState<string>('');
+  const [customerDateFrom, setCustomerDateFrom] = useState<string>('');
+  const [customerDateTo, setCustomerDateTo] = useState<string>('');
 
   const clearFilters = () => {
     setFilters({
@@ -753,6 +756,15 @@ export default function App() {
 
   const handleContractAction = async (saleId: string, actionItem: 'pause' | 'resume' | 'cancel' | 'inadimplente' | 'pay') => {
     if (!currentUser) return;
+    
+    // Double confirmation for cancel
+    if (actionItem === 'cancel') {
+      if (!window.confirm('Tem certeza que deseja CANCELAR este contrato? Esta ação não pode ser desfeita facilmente.')) return;
+    }
+    if (actionItem === 'inadimplente') {
+      if (!window.confirm('Deseja marcar este contrato como INADIMPLENTE?')) return;
+    }
+
     try {
       const saleRef = doc(db, 'sales', saleId);
       let updates: Partial<Sale> = { updated_at: new Date().toISOString() };
@@ -836,8 +848,21 @@ export default function App() {
     }
 
     try {
-      // Check if customer already exists by phone
+      // Check for duplicate lead (same phone within last 5 minutes)
       const normalizedPhone = leadData.phone.replace(/\D/g, '');
+      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const recentDuplicate = sales.find(s => 
+        s.phone.replace(/\D/g, '') === normalizedPhone && 
+        s.created_at > fiveMinAgo &&
+        s.vendedor_id === currentUser.id
+      );
+      if (recentDuplicate) {
+        if (!window.confirm(`Já existe um lead com este telefone registrado há poucos minutos. Deseja realmente criar um NOVO lead duplicado?`)) {
+          return;
+        }
+      }
+
+      // Check if customer already exists by phone
       const existingCustomer = customers.find(c => c.phone.replace(/\D/g, '') === normalizedPhone);
       
       let customerId: string;
@@ -978,6 +1003,10 @@ export default function App() {
     if (newStatus === SaleStatus.PAGO && !hasReceipt && !forceUpdate) {
       setSalePendingReceipt(sale || null);
       return;
+    }
+
+    if (newStatus === SaleStatus.EXCLUSAO_SOLICITADA) {
+      if (!window.confirm('Tem certeza que deseja solicitar a EXCLUSÃO desta venda? Um administrador precisará aprovar.')) return;
     }
 
     if (newStatus === SaleStatus.REMARKETING && !returnDate) {
@@ -1462,7 +1491,8 @@ export default function App() {
       if (!sale) return;
 
       if (receipts.some(r => r.sale_id === saleId)) {
-        showToast('Esta venda já possui um comprovante anexado.', 'warning');
+        // If called from the pending receipt modal, skip duplicate check and just proceed
+        // The receipt already exists, so just return success
         return;
       }
 
@@ -2150,6 +2180,32 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+                    <div className="flex gap-2 flex-wrap">
+                      <select 
+                        value={customerVendorFilter}
+                        onChange={(e) => setCustomerVendorFilter(e.target.value)}
+                        className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                      >
+                        <option value="">Todos os Vendedores</option>
+                        {users.filter(u => u.role !== UserRole.ADMIN).map(u => (
+                          <option key={u.id} value={u.id}>{u.name}</option>
+                        ))}
+                      </select>
+                      <input 
+                        type="date"
+                        value={customerDateFrom}
+                        onChange={(e) => setCustomerDateFrom(e.target.value)}
+                        className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        title="Data de cadastro (a partir de)"
+                      />
+                      <input 
+                        type="date"
+                        value={customerDateTo}
+                        onChange={(e) => setCustomerDateTo(e.target.value)}
+                        className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        title="Data de cadastro (até)"
+                      />
+                    </div>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left">
@@ -2164,10 +2220,17 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-black/5 text-sm">
                         {customers
-                          .filter(c => 
-                            c.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                            c.phone.includes(searchQuery.replace(/\D/g, ''))
-                          )
+                          .filter(c => {
+                            // Text search filter
+                            const matchesSearch = !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.phone.includes(searchQuery.replace(/\D/g, ''));
+                            // Vendor filter: check if any of the customer's sales belong to the selected vendor
+                            const matchesVendor = !customerVendorFilter || sales.some(s => s.customer_id === c.id && s.vendedor_id === customerVendorFilter);
+                            // Date filters
+                            const custDate = toLocalDateString(c.created_at);
+                            const matchesDateFrom = !customerDateFrom || custDate >= customerDateFrom;
+                            const matchesDateTo = !customerDateTo || custDate <= customerDateTo;
+                            return matchesSearch && matchesVendor && matchesDateFrom && matchesDateTo;
+                          })
                           .map(customer => (
                           <tr key={customer.id} className="hover:bg-zinc-50/50 transition-colors">
                             <td className="p-4">
