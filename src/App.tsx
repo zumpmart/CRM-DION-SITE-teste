@@ -3887,25 +3887,6 @@ export default function App() {
 
                   <div className="flex flex-col gap-3">
                     <button 
-                      onClick={async () => {
-                        if (!salePendingReceipt) return;
-                        const pendingSaleId = salePendingReceipt.id;
-                        setIsUploadingReceipt(true);
-                        try {
-                          await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
-                          showToast('Venda marcada como PAGA (sem comprovante).', 'success');
-                          setSalePendingReceipt(null);
-                        } catch (err: any) {
-                          showToast('Erro ao atualizar status: ' + err.message, 'error');
-                        } finally {
-                          setIsUploadingReceipt(false);
-                        }
-                      }}
-                      className="w-full px-6 py-3 rounded-xl font-bold text-emerald-600 bg-emerald-50 hover:bg-emerald-100 transition-all"
-                    >
-                      Marcar como PAGO sem Comprovante
-                    </button>
-                    <button 
                       onClick={() => setSalePendingReceipt(null)}
                       className="w-full px-6 py-3 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
                     >
