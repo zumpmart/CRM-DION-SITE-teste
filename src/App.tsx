@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   LayoutDashboard, 
   Users, 
@@ -34,17 +34,52 @@ import {
   MessageCircle,
   CalendarDays,
   Database,
-  Upload
+  Upload,
+  Download,
+  Briefcase,
+  RefreshCw,
+  Repeat,
+  UserCheck,
+  Clock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper from 'react-easy-crop';
 import 'react-easy-crop/react-easy-crop.css';
-import { UserProfile, UserRole, Sale, SaleStatus, Receipt, ReceiptStatus, AuditLog, Payment } from './types';
+import { UserProfile, UserRole, Sale, SaleStatus, SaleType, ContractStatus, Customer, Receipt, ReceiptStatus, AuditLog, Payment } from './types';
 import { db, auth, storage, firebaseConfig } from './firebase';
 import { initializeApp } from 'firebase/app';
 import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, limit, or } from 'firebase/firestore';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, updatePassword, EmailAuthProvider, reauthenticateWithCredential, getAuth as getSecondaryAuth } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+
+// --- Toast System ---
+type ToastType = 'success' | 'error' | 'warning' | 'info';
+interface ToastItem { id: number; message: string; type: ToastType; }
+
+const ToastContainer = ({ toasts, onRemove }: { toasts: ToastItem[]; onRemove: (id: number) => void }) => (
+  <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-3 max-w-sm">
+    <AnimatePresence>
+      {toasts.map(toast => (
+        <motion.div
+          key={toast.id}
+          initial={{ opacity: 0, y: 20, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, x: 100, scale: 0.95 }}
+          className={`px-5 py-4 rounded-2xl shadow-xl border backdrop-blur-sm flex items-start gap-3 cursor-pointer ${
+            toast.type === 'success' ? 'bg-emerald-50/95 border-emerald-200 text-emerald-800' :
+            toast.type === 'error' ? 'bg-red-50/95 border-red-200 text-red-800' :
+            toast.type === 'warning' ? 'bg-amber-50/95 border-amber-200 text-amber-800' :
+            'bg-blue-50/95 border-blue-200 text-blue-800'
+          }`}
+          onClick={() => onRemove(toast.id)}
+        >
+          <span className="text-lg">{toast.type === 'success' ? '✅' : toast.type === 'error' ? '❌' : toast.type === 'warning' ? '⚠️' : 'ℹ️'}</span>
+          <p className="text-sm font-medium leading-snug">{toast.message}</p>
+        </motion.div>
+      ))}
+    </AnimatePresence>
+  </div>
+);
 
 // --- Components ---
 
@@ -103,6 +138,9 @@ const SERVICES = ['Logotipo', 'Flayer', 'Faixada', 'Site', 'Outros'];
 
 const calculateCommission = (sale: Sale, user?: UserProfile) => {
   if (!user) return 0;
+  if (sale.sale_type === SaleType.RECORRENTE) {
+    return (sale.value * (user.recurring_commission || 0)) / 100;
+  }
   if (user.commissions && user.commissions[sale.service] !== undefined) {
     return user.commissions[sale.service];
   }
@@ -119,6 +157,24 @@ export default function App() {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
+  const [newLeadSaleType, setNewLeadSaleType] = useState<SaleType>(SaleType.PONTUAL);
+  const [newLeadServices, setNewLeadServices] = useState<string[]>([]);
+  const toastIdRef = useRef(0);
+
+  const showToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  }, []);
+
+  const removeToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
   const [loading, setLoading] = useState(true);
   const [showUserModal, setShowUserModal] = useState(false);
   const [confirmInput, setConfirmInput] = useState('');
@@ -151,6 +207,8 @@ export default function App() {
   const [deletingSaleId, setDeletingSaleId] = useState<string | null>(null);
   const [transferringSale, setTransferringSale] = useState<Sale | null>(null);
   const [transferTargetId, setTransferTargetId] = useState<string>('');
+  const [massTransferringUser, setMassTransferringUser] = useState<UserProfile | null>(null);
+  const [massTransferTargetId, setMassTransferTargetId] = useState<string>('');
   const [dateRange, setDateRange] = useState({
     start: getLocalISODate(),
     end: getLocalISODate()
@@ -244,6 +302,13 @@ export default function App() {
       }
 
       setCurrentUser({ ...profileData, id: docSnap.id });
+
+      // Update last login timestamp
+      try {
+        await updateDoc(docRef, { last_login_at: new Date().toISOString() });
+      } catch (e) {
+        console.warn('Could not update last_login_at:', e);
+      }
     } catch (err: any) {
       console.error('Fetch profile exception:', err);
       setLoginError('Erro ao carregar perfil: ' + err.message);
@@ -313,12 +378,13 @@ export default function App() {
       const salesQ2 = query(collection(db, 'sales'), where('transfer_to', '==', currentUser.id));
       const salesQ3 = query(collection(db, 'sales'), where('status', '==', SaleStatus.PAGO));
       
-      let mySales: Sale[] = [];
-      let transferredSales: Sale[] = [];
-      let rankingSales: Sale[] = [];
+      // Using refs to fix stale closure bug - prevents data from disappearing when only one listener fires
+      const mySalesRef = { current: [] as Sale[] };
+      const transferredSalesRef = { current: [] as Sale[] };
+      const rankingSalesRef = { current: [] as Sale[] };
 
       const mergeSales = () => {
-        const merged = [...mySales, ...transferredSales, ...rankingSales];
+        const merged = [...mySalesRef.current, ...transferredSalesRef.current, ...rankingSalesRef.current];
         const uniqueSalesMap = new Map<string, Sale>();
         
         merged.forEach(item => {
@@ -338,17 +404,17 @@ export default function App() {
       };
 
       unsubSales = onSnapshot(salesQ1, (snapshot) => {
-        mySales = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
+        mySalesRef.current = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
         mergeSales();
       }, (error) => handleSyncError(error, 'Minhas Vendas'));
 
       unsubSalesTransferred = onSnapshot(salesQ2, (snapshot) => {
-        transferredSales = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
+        transferredSalesRef.current = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
         mergeSales();
       }, (error) => handleSyncError(error, 'Vendas Transferidas'));
 
       unsubRankingSales = onSnapshot(salesQ3, (snapshot) => {
-        rankingSales = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
+        rankingSalesRef.current = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
         mergeSales();
       }, (error) => handleSyncError(error, 'Ranking'));
 
@@ -395,6 +461,15 @@ export default function App() {
       if (unsubLogs) unsubLogs();
       if (unsubPayments) unsubPayments();
     };
+  }, [currentUser]);
+
+  // Customers listener (all users)
+  useEffect(() => {
+    if (!currentUser) return;
+    const unsubCustomers = onSnapshot(collection(db, 'customers'), (snapshot) => {
+      setCustomers(snapshot.docs.map(doc => ({ ...(doc.data() as Customer), id: doc.id })));
+    });
+    return () => unsubCustomers();
   }, [currentUser]);
 
   // --- Background Cleanup Routine ---
@@ -469,20 +544,56 @@ export default function App() {
       }
       
       return matchVendedor && matchStatus && matchStartDate && matchEndDate;
+    }).filter(sale => {
+      // Search filter by phone
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        const matchPhone = sale.phone?.toLowerCase().includes(q);
+        const matchName = sale.name?.toLowerCase().includes(q);
+        if (!matchPhone && !matchName) return false;
+      }
+      return true;
     }).map(sale => {
       const existingReceipt = receipts.find(r => r.sale_id === sale.id);
       return { ...sale, receipt_id: existingReceipt?.id };
     });
-  }, [sales, filters, receipts, currentUser]);
+  }, [sales, filters, receipts, currentUser, searchQuery]);
+
+  // Count remarketing leads due today or overdue
+  const remarketingBadgeCount = useMemo(() => {
+    if (!currentUser) return 0;
+    const today = toLocalDateString(new Date().toISOString());
+    return sales.filter(s => 
+      s.status === SaleStatus.REMARKETING && 
+      s.return_date && 
+      toLocalDateString(s.return_date) <= today &&
+      (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || s.vendedor_id === currentUser.id)
+    ).length;
+  }, [sales, currentUser]);
+
+  const expiringContractsCount = useMemo(() => {
+    if (!currentUser) return 0;
+    const now = new Date();
+    const in7Days = new Date();
+    in7Days.setDate(in7Days.getDate() + 7);
+    
+    return sales.filter(s => {
+      if (s.sale_type !== SaleType.RECORRENTE || s.contract_status !== ContractStatus.ATIVO || !s.next_billing_date) return false;
+      const nextBilling = new Date(`${s.next_billing_date}T23:59:59`);
+      return nextBilling >= now && nextBilling <= in7Days;
+    }).length;
+  }, [sales, currentUser]);
 
   const ranking = useMemo(() => {
     const today = toLocalDateString(new Date().toISOString());
     const currentMonth = today.substring(0, 7);
     
-    const curr = new Date();
-    const first = curr.getDate() - curr.getDay() + (curr.getDay() === 0 ? -6 : 1);
-    const startOfWeekDate = new Date(curr.setDate(first));
-    const endOfWeekDate = new Date(curr.setDate(first + 6));
+    // Fixed: avoid Date mutation bug by creating separate Date objects
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const startOfWeekDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+    const endOfWeekDate = new Date(startOfWeekDate.getFullYear(), startOfWeekDate.getMonth(), startOfWeekDate.getDate() + 6);
     const startOfWeek = toLocalDateString(startOfWeekDate.toISOString());
     const endOfWeek = toLocalDateString(endOfWeekDate.toISOString());
 
@@ -547,9 +658,16 @@ export default function App() {
 
     const conversionRate = createdInRange.length > 0 ? (createdInRange.filter(s => s.status === SaleStatus.PAGO).length / createdInRange.length) * 100 : 0;
 
+    const mrr = sales
+      .filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO)
+      .reduce((acc, s) => acc + s.value, 0);
+    const activeContracts = sales.filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO).length;
+
     return {
       dailyTotal,
       monthlyTotal,
+      mrr,
+      activeContracts,
       dailyCount: createdInRange.length,
       statusCounts,
       conversionRate,
@@ -593,30 +711,196 @@ export default function App() {
 
   // --- Actions ---
 
+  const handleBackup = async () => {
+    if (!currentUser) return;
+    try {
+      showToast('Gerando backup...', 'info');
+      const salesSnap = await getDocs(collection(db, 'sales'));
+      const profilesSnap = await getDocs(collection(db, 'profiles'));
+      const receiptsSnap = await getDocs(collection(db, 'receipts'));
+      const paymentsSnap = await getDocs(collection(db, 'payments'));
+      const logsSnap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(500)));
+
+      const backup = {
+        exported_at: new Date().toISOString(),
+        exported_by: currentUser.name,
+        data: {
+          sales: salesSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+          profiles: profilesSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+          receipts: receiptsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+          payments: paymentsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+          audit_logs: logsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+        }
+      };
+
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `backup_crm_${getLocalISODate()}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast('Backup baixado com sucesso!', 'success');
+      await addLog(currentUser, 'Realizou backup completo do sistema');
+    } catch (error: any) {
+      showToast('Erro ao gerar backup: ' + error.message, 'error');
+    }
+  };
+
+  const handleContractAction = async (saleId: string, actionItem: 'pause' | 'resume' | 'cancel' | 'inadimplente' | 'pay') => {
+    if (!currentUser) return;
+    try {
+      const saleRef = doc(db, 'sales', saleId);
+      let updates: Partial<Sale> = { updated_at: new Date().toISOString() };
+      let logMsg = '';
+
+      switch (actionItem) {
+        case 'pause':
+          updates.contract_status = ContractStatus.PAUSADO;
+          logMsg = `Pausou contrato da venda`;
+          break;
+        case 'resume':
+          updates.contract_status = ContractStatus.ATIVO;
+          logMsg = `Retomou contrato da venda`;
+          break;
+        case 'inadimplente':
+          updates.contract_status = ContractStatus.INADIMPLENTE;
+          logMsg = `Marcou contrato como inadimplente`;
+          break;
+        case 'cancel':
+          updates.contract_status = ContractStatus.CANCELADO;
+          logMsg = `Cancelou contrato da venda`;
+          break;
+        case 'pay':
+          const saleObj = sales.find(s => s.id === saleId);
+          if (saleObj) {
+            const currentNextBilling = new Date(saleObj.next_billing_date || saleObj.contract_start || new Date());
+            if (saleObj.billing_cycle === 'trimestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 3);
+            else if (saleObj.billing_cycle === 'semestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 6);
+            else if (saleObj.billing_cycle === 'anual') currentNextBilling.setFullYear(currentNextBilling.getFullYear() + 1);
+            else currentNextBilling.setMonth(currentNextBilling.getMonth() + 1);
+            
+            updates.next_billing_date = currentNextBilling.toISOString().split('T')[0];
+            updates.contract_status = ContractStatus.ATIVO;
+            logMsg = `Registrou pagamento e renovou ciclo do contrato para ${updates.next_billing_date}`;
+          }
+          break;
+      }
+
+      await updateDoc(saleRef, updates);
+      await addLog(currentUser, logMsg, saleId);
+      showToast('Ação no contrato realizada com sucesso!', 'success');
+    } catch (error: any) {
+      showToast('Erro ao atualizar contrato: ' + error.message, 'error');
+    }
+  };
+
+  const handleMassTransfer = async () => {
+    if (!massTransferringUser || !massTransferTargetId || !currentUser) return;
+    try {
+      // Find all active contracts/customers where this user is the vendor or transfer target
+      const targetSales = sales.filter(s => 
+        (s.vendedor_id === massTransferringUser.id || s.transfer_to === massTransferringUser.id) &&
+        (s.status !== SaleStatus.CANCELADO && s.status !== SaleStatus.DELETED) &&
+        (s.contract_status !== ContractStatus.CANCELADO)
+      );
+      
+      let count = 0;
+      for (const sale of targetSales) {
+        await updateDoc(doc(db, 'sales', sale.id), {
+          transfer_to: massTransferTargetId,
+          updated_at: new Date().toISOString()
+        });
+        count++;
+      }
+      
+      await addLog(currentUser, `Transferiu em massa ${count} negócios de ${massTransferringUser.name} para novo responsável.`, massTransferringUser.id);
+      showToast(`Transferência de ${count} negócios realizada com sucesso!`, 'success');
+      setMassTransferringUser(null);
+      setMassTransferTargetId('');
+    } catch (error: any) {
+      showToast('Erro na transferência em massa: ' + error.message, 'error');
+    }
+  };
+
   const handleAddLead = async (leadData: any) => {
     if (!currentUser) return;
     
     if (leadData.value < 0) {
-      alert('O valor não pode ser negativo.');
+      showToast('O valor não pode ser negativo.', 'warning');
       return;
     }
 
     try {
-      const docRef = await addDoc(collection(db, 'sales'), {
+      // Check if customer already exists by phone
+      const normalizedPhone = leadData.phone.replace(/\D/g, '');
+      const existingCustomer = customers.find(c => c.phone.replace(/\D/g, '') === normalizedPhone);
+      
+      let customerId: string;
+      let isReturning = false;
+
+      if (existingCustomer) {
+        customerId = existingCustomer.id;
+        isReturning = true;
+        // Update customer stats
+        await updateDoc(doc(db, 'customers', customerId), {
+          total_spent: (existingCustomer.total_spent || 0) + leadData.value,
+          total_purchases: (existingCustomer.total_purchases || 0) + 1,
+          services: [...new Set([...(existingCustomer.services || []), ...(leadData.services || [leadData.service])])],
+          updated_at: new Date().toISOString(),
+        });
+        showToast(`Cliente existente encontrado! (${existingCustomer.name}) — ${existingCustomer.total_purchases + 1}ª compra`, 'info');
+      } else {
+        // Create new customer
+        const customerRef = await addDoc(collection(db, 'customers'), {
+          name: leadData.name || leadData.phone,
+          phone: leadData.phone,
+          email: '',
+          first_purchase_date: leadData.created_at || new Date().toISOString(),
+          total_spent: leadData.value,
+          total_purchases: 1,
+          services: leadData.services || [leadData.service],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+        customerId = customerRef.id;
+      }
+
+      const saleData: any = {
         ...leadData,
         name: leadData.name || 'Cliente',
         vendedor_id: currentUser.id,
+        customer_id: customerId,
+        is_returning_customer: isReturning,
+        sale_type: leadData.sale_type || SaleType.PONTUAL,
         created_at: leadData.created_at || new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      });
+        updated_at: new Date().toISOString(),
+      };
 
-      await addLog(currentUser, `Registrou novo lead: ${leadData.phone}`, docRef.id);
+      // Add recurring fields if applicable
+      if (leadData.sale_type === SaleType.RECORRENTE) {
+        saleData.billing_cycle = leadData.billing_cycle || 'mensal';
+        saleData.contract_start = leadData.contract_start || new Date().toISOString().split('T')[0];
+        saleData.contract_end = leadData.contract_end || '';
+        saleData.contract_status = ContractStatus.ATIVO;
+        // Calculate next billing date
+        const start = new Date(saleData.contract_start);
+        if (leadData.billing_cycle === 'trimestral') start.setMonth(start.getMonth() + 3);
+        else if (leadData.billing_cycle === 'semestral') start.setMonth(start.getMonth() + 6);
+        else if (leadData.billing_cycle === 'anual') start.setFullYear(start.getFullYear() + 1);
+        else start.setMonth(start.getMonth() + 1);
+        saleData.next_billing_date = start.toISOString().split('T')[0];
+      }
+
+      const docRef = await addDoc(collection(db, 'sales'), saleData);
+
+      await addLog(currentUser, `Registrou novo lead: ${leadData.phone}${isReturning ? ' (cliente retornante)' : ''}`, docRef.id);
       clearFilters();
       setTimeout(() => {
         setCurrentPage('sales');
       }, 100);
     } catch (error: any) {
-      alert('Erro ao salvar lead: ' + error.message);
+      showToast('Erro ao salvar lead: ' + error.message, 'error');
     }
   };
 
@@ -627,7 +911,7 @@ export default function App() {
     try {
       const sale = sales.find(s => s.id === saleId);
       if (updatedData.status === SaleStatus.PAGO && !sale?.receipt_id && !newReceipt) {
-        alert('⚠️ ATENÇÃO: Não é possível marcar como PAGO sem um comprovante enviado. Por favor, anexe o comprovante primeiro.');
+        showToast('Não é possível marcar como PAGO sem um comprovante enviado. Anexe o comprovante primeiro.', 'warning');
         setIsSubmitting(false);
         return;
       }
@@ -659,7 +943,7 @@ export default function App() {
       await addLog(currentUser, `Editou venda ${saleId}${changeString}`, saleId);
       setEditingSale(null);
     } catch (error: any) {
-      alert('Erro ao editar venda: ' + error.message);
+      showToast('Erro ao editar venda: ' + error.message, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -717,7 +1001,7 @@ export default function App() {
       await updateDoc(doc(db, 'sales', saleId), updates);
       await addLog(currentUser, `Alterou status da venda ${saleId} de ${sale?.status} para ${newStatus}`, saleId);
     } catch (error: any) {
-      alert('Erro ao atualizar status: ' + error.message);
+      showToast('Erro ao atualizar status: ' + error.message, 'error');
     }
   };
 
@@ -751,7 +1035,7 @@ export default function App() {
           console.error('Erro ao importar linha', i, err);
         }
       }
-      alert(`${importedCount} leads importados com sucesso!`);
+      showToast(`${importedCount} leads importados com sucesso!`, 'success');
       if (e.target) e.target.value = ''; // Reset input
     };
     reader.readAsText(file);
@@ -800,7 +1084,7 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
         await addLog(currentUser, `Moveu venda ${saleId} para lixeira`, saleId);
-        alert('Venda movida para a lixeira!');
+        showToast('Venda movida para a lixeira.', 'success');
       } else {
         await updateDoc(doc(db, 'sales', saleId), {
           status: SaleStatus.EXCLUSAO_SOLICITADA,
@@ -808,10 +1092,10 @@ export default function App() {
           updated_at: new Date().toISOString()
         });
         await addLog(currentUser, `Solicitou exclusão da venda ${saleId}`, saleId);
-        alert('Exclusão enviada!');
+        showToast('Solicitação de exclusão enviada!', 'success');
       }
     } catch (error: any) {
-      alert('Erro ao excluir venda: ' + error.message);
+      showToast('Erro ao excluir venda: ' + error.message, 'error');
     } finally {
       setDeletingSaleId(null);
       setEditingSale(null);
@@ -830,7 +1114,7 @@ export default function App() {
       });
       await addLog(currentUser, `Rejeitou exclusão da venda ${sale.id}`, sale.id);
     } catch (error: any) {
-      alert('Erro ao rejeitar exclusão: ' + error.message);
+      showToast('Erro ao rejeitar exclusão: ' + error.message, 'error');
     }
   };
 
@@ -848,7 +1132,7 @@ export default function App() {
       setTransferringSale(null);
       setTransferTargetId('');
     } catch (error: any) {
-      alert('Erro ao transferir: ' + error.message);
+      showToast('Erro ao transferir: ' + error.message, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -864,7 +1148,7 @@ export default function App() {
       });
       await addLog(currentUser, `Aceitou a transferência do lead ${sale.name}`, sale.id);
     } catch (error: any) {
-      alert('Erro ao aceitar transferência: ' + error.message);
+      showToast('Erro ao aceitar transferência: ' + error.message, 'error');
     }
   };
 
@@ -877,7 +1161,7 @@ export default function App() {
       });
       await addLog(currentUser, `Recusou a transferência do lead ${sale.name}`, sale.id);
     } catch (error: any) {
-      alert('Erro ao recusar transferência: ' + error.message);
+      showToast('Erro ao recusar transferência: ' + error.message, 'error');
     }
   };
 
@@ -890,7 +1174,7 @@ export default function App() {
       });
       await addLog(currentUser, `Cancelou a transferência do lead ${sale.name}`, sale.id);
     } catch (error: any) {
-      alert('Erro ao cancelar transferência: ' + error.message);
+      showToast('Erro ao cancelar transferência: ' + error.message, 'error');
     }
   };
 
@@ -901,7 +1185,7 @@ export default function App() {
       await updateDoc(doc(db, 'receipts', receiptId), { status: newStatus });
       await addLog(currentUser, `Alterou status do comprovante ${receiptId} para ${newStatus}`, receiptId);
     } catch (error: any) {
-      alert('Erro ao atualizar status do comprovante: ' + error.message);
+      showToast('Erro ao atualizar status do comprovante: ' + error.message, 'error');
     }
   };
 
@@ -920,7 +1204,7 @@ export default function App() {
       });
       await addLog(currentUser, `Aprovou pagamento do comprovante ${receiptId}`, receiptId);
     } catch (error: any) {
-      alert('Erro ao atualizar comprovante: ' + error.message);
+      showToast('Erro ao atualizar comprovante: ' + error.message, 'error');
     }
   };
 
@@ -934,7 +1218,7 @@ export default function App() {
       }
       await addLog(currentUser, `Atualizou dados do usuário ${userId}`, userId);
     } catch (error: any) {
-      alert('Erro ao atualizar usuário: ' + error.message);
+      showToast('Erro ao atualizar usuário: ' + error.message, 'error');
     }
   };
 
@@ -954,9 +1238,9 @@ export default function App() {
       });
       setCurrentUser(prev => prev ? { ...prev, name, pix_key } : null);
       await addLog(currentUser, `Atualizou o próprio perfil`, currentUser.id);
-      alert('Perfil atualizado com sucesso!');
+      showToast('Perfil atualizado com sucesso!', 'success');
     } catch (error: any) {
-      alert('Erro ao atualizar perfil: ' + error.message);
+      showToast('Erro ao atualizar perfil: ' + error.message, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -972,7 +1256,7 @@ export default function App() {
     const confirmPassword = formData.get('confirmPassword') as string;
 
     if (newPassword !== confirmPassword) {
-      alert('As novas senhas não coincidem.');
+      showToast('As novas senhas não coincidem.', 'warning');
       return;
     }
 
@@ -984,14 +1268,14 @@ export default function App() {
       await updatePassword(auth.currentUser, newPassword);
       
       await addLog(currentUser, `Alterou a própria senha`, currentUser.id);
-      alert('Senha atualizada com sucesso!');
+      showToast('Senha atualizada com sucesso!', 'success');
       (e.target as HTMLFormElement).reset();
     } catch (error: any) {
       console.error('Error updating password:', error);
       if (error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
-        alert('Senha atual incorreta.');
+        showToast('Senha atual incorreta.', 'error');
       } else {
-        alert('Erro ao atualizar senha: ' + error.message);
+        showToast('Erro ao atualizar senha: ' + error.message, 'error');
       }
     } finally {
       setIsSubmitting(false);
@@ -1003,10 +1287,10 @@ export default function App() {
       try {
         await deleteDoc(doc(db, 'profiles', userId));
         await addLog(currentUser, `Excluiu o usuário ${userId}`, userId);
-        alert('Usuário excluído com sucesso!');
+        showToast('Usuário excluído com sucesso!', 'success');
       } catch (error) {
         console.error('Erro ao excluir usuário:', error);
-        alert('Erro ao excluir usuário. Verifique suas permissões.');
+        showToast('Erro ao excluir usuário. Verifique suas permissões.', 'error');
       }
     }
   };
@@ -1036,10 +1320,10 @@ export default function App() {
           for (const d of logsSnap.docs) await deleteDoc(doc(db, 'audit_logs', d.id));
 
           await addLog(currentUser, 'Resetou o banco de dados (apagou vendas, comprovantes, pagamentos e logs)', currentUser.id);
-          alert('Banco de dados limpo com sucesso!');
+          showToast('Banco de dados limpo com sucesso!', 'success');
         } catch (error: any) {
           console.error('Erro ao limpar banco de dados:', error);
-          alert('Erro ao limpar banco: ' + error.message);
+          showToast('Erro ao limpar banco: ' + error.message, 'error');
         } finally {
           setIsSubmitting(false);
         }
@@ -1113,7 +1397,7 @@ export default function App() {
       setCropImageSrc(null);
       setTargetUserIdForPhoto(null);
     } catch (error: any) {
-      alert('Erro ao atualizar foto: ' + error.message);
+      showToast('Erro ao atualizar foto: ' + error.message, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -1123,7 +1407,7 @@ export default function App() {
     if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
 
     if (selectedSalesToPay.length === 0) {
-      alert('Selecione pelo menos uma venda para pagar.');
+      showToast('Selecione pelo menos uma venda para pagar.', 'warning');
       return;
     }
 
@@ -1158,10 +1442,10 @@ export default function App() {
       setPayingSeller(null);
       setSelectedSalesToPay([]);
       setPaymentReceipt(null);
-      alert('Pagamento registrado com sucesso!');
+      showToast('Pagamento registrado com sucesso!', 'success');
       await addLog(currentUser, `Registrou pagamento de R$ ${amount} para vendedor ${vendedorId}`, vendedorId);
     } catch (error: any) {
-      alert('Erro ao registrar pagamento: ' + error.message);
+      showToast('Erro ao registrar pagamento: ' + error.message, 'error');
     } finally {
       setIsUploadingReceipt(false);
     }
@@ -1174,7 +1458,7 @@ export default function App() {
       if (!sale) return;
 
       if (receipts.some(r => r.sale_id === saleId)) {
-        alert('⚠️ Esta venda já possui um comprovante anexado.');
+        showToast('Esta venda já possui um comprovante anexado.', 'warning');
         return;
       }
 
@@ -1194,10 +1478,10 @@ export default function App() {
       });
 
       await addLog(currentUser, `Enviou comprovante para venda ${saleId}`, receiptRef.id);
-      alert('✅ Comprovante enviado e registrado com sucesso!');
+      showToast('Comprovante enviado com sucesso!', 'success');
     } catch (err: any) {
       console.error('Erro no processo de upload:', err);
-      alert('Erro no upload: ' + err.message);
+      showToast('Erro no upload: ' + err.message, 'error');
     }
   };
 
@@ -1254,11 +1538,11 @@ export default function App() {
         created_at: new Date().toISOString()
       });
 
-      alert('Vendedor criado com sucesso!');
+      showToast('Vendedor criado com sucesso!', 'success');
       setShowUserModal(false);
       await addLog(currentUser, `Criou novo vendedor: ${userData.name}`, user.uid);
     } catch (error: any) {
-      alert('Erro ao criar vendedor: ' + error.message);
+      showToast('Erro ao criar vendedor: ' + error.message, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -1362,11 +1646,14 @@ export default function App() {
     );
   }
 
+
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'customers', label: 'Clientes', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'contracts', label: 'Contratos', icon: Repeat, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: expiringContractsCount },
     { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
     { id: 'sales', label: currentUser.role === UserRole.VENDEDOR ? 'Minhas Vendas' : 'Todas as Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: remarketingBadgeCount },
     { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN, UserRole.GERENTE] },
@@ -1379,8 +1666,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-zinc-50 flex">
+      {/* Mobile Menu Overlay */}
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setMobileMenuOpen(false)}
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40 md:hidden"
+          />
+        )}
+      </AnimatePresence>
+
       {/* Sidebar */}
-      <aside className={`${sidebarOpen ? 'w-64' : 'w-20'} bg-white border-r border-black/5 transition-all duration-300 flex flex-col z-50`}>
+      <aside className={`${
+        sidebarOpen ? 'w-64' : 'w-20'
+      } bg-white border-r border-black/5 transition-all duration-300 flex-col z-50 hidden md:flex`}>
         <div className="p-6 flex items-center gap-3">
           <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shrink-0">
             <TrendingUp className="text-white w-6 h-6" />
@@ -1401,7 +1703,10 @@ export default function App() {
             >
               <item.icon className="w-5 h-5 shrink-0" />
               {sidebarOpen && <span className="font-medium text-sm">{item.label}</span>}
-              {sidebarOpen && currentPage === item.id && <div className="ml-auto w-1.5 h-1.5 bg-indigo-600 rounded-full" />}
+              {sidebarOpen && (item as any).badge > 0 && (
+                <span className="ml-auto bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center">{(item as any).badge}</span>
+              )}
+              {sidebarOpen && !(item as any).badge && currentPage === item.id && <div className="ml-auto w-1.5 h-1.5 bg-indigo-600 rounded-full" />}
             </button>
           ))}
         </nav>
@@ -1432,12 +1737,63 @@ export default function App() {
         </div>
       </aside>
 
+      {/* Mobile Sidebar */}
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <motion.aside
+            initial={{ x: -280 }}
+            animate={{ x: 0 }}
+            exit={{ x: -280 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+            className="fixed top-0 left-0 w-72 h-full bg-white border-r border-black/5 flex flex-col z-50 md:hidden shadow-2xl"
+          >
+            <div className="p-6 flex items-center gap-3">
+              <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shrink-0">
+                <TrendingUp className="text-white w-6 h-6" />
+              </div>
+              <span className="font-bold text-lg text-zinc-900 truncate">Dion Logos</span>
+            </div>
+
+            <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
+              {menuItems.filter(item => item.roles.includes(currentUser.role)).map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => { setCurrentPage(item.id); setMobileMenuOpen(false); }}
+                  className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
+                    currentPage === item.id 
+                    ? 'bg-indigo-50 text-indigo-600' 
+                    : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+                  }`}
+                >
+                  <item.icon className="w-5 h-5 shrink-0" />
+                  <span className="font-medium text-sm">{item.label}</span>
+                  {(item as any).badge > 0 && (
+                    <span className="ml-auto bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center">{(item as any).badge}</span>
+                  )}
+                  {!(item as any).badge && currentPage === item.id && <div className="ml-auto w-1.5 h-1.5 bg-indigo-600 rounded-full" />}
+                </button>
+              ))}
+            </nav>
+
+            <div className="p-4 border-t border-black/5">
+              <button 
+                onClick={handleLogout}
+                className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-red-500 hover:bg-red-50 transition-all"
+              >
+                <LogOut className="w-5 h-5 shrink-0" />
+                <span className="font-medium text-sm">Sair</span>
+              </button>
+            </div>
+          </motion.aside>
+        )}
+      </AnimatePresence>
+
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
         {/* Header */}
         <header className="h-16 bg-white border-bottom border-black/5 px-8 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-4">
-            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 hover:bg-zinc-100 rounded-lg transition-all">
+            <button onClick={() => { if (window.innerWidth < 768) { setMobileMenuOpen(!mobileMenuOpen); } else { setSidebarOpen(!sidebarOpen); } }} className="p-2 hover:bg-zinc-100 rounded-lg transition-all">
               <Menu className="w-5 h-5 text-zinc-500" />
             </button>
             <h2 className="text-lg font-bold text-zinc-900 capitalize">{currentPage.replace('-', ' ')}</h2>
@@ -1472,6 +1828,20 @@ export default function App() {
             >
               {currentPage === 'dashboard' && (
                 <div className="space-y-8">
+                  {expiringContractsCount > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 shadow-sm">
+                      <div className="p-2 bg-amber-100 rounded-xl shrink-0">
+                        <AlertCircle className="w-5 h-5 text-amber-600" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-amber-900">Atenção: Contratos Vencendo ou Vencidos</h4>
+                        <p className="text-sm text-amber-800 mt-1 flex items-center flex-wrap">
+                          Você tem <strong className="mx-1">{expiringContractsCount}</strong> contrato(s) ativo(s) com cobrança próxima ou já vencida.
+                          <button onClick={() => setCurrentPage('contracts')} className="ml-2 font-bold underline hover:text-amber-600 transition-colors">Ver contratos</button>
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
                       <h3 className="text-2xl font-bold text-zinc-900">Resumo Operacional</h3>
@@ -1541,6 +1911,13 @@ export default function App() {
                           <option value="all">Geral</option>
                         </select>
                       }
+                    />
+                    <StatCard 
+                      title="MRR (Receita Recorrente)" 
+                      value={`R$ ${stats.mrr.toLocaleString()}`} 
+                      icon={Repeat} 
+                      color="bg-purple-600"
+                      subtitle={`${stats.activeContracts} contratos ativos`}
                     />
                   </div>
 
@@ -1746,20 +2123,221 @@ export default function App() {
                 </div>
               )}
 
+              {currentPage === 'customers' && (
+                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                  <div className="p-6 border-b border-black/5 flex flex-col gap-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="font-bold text-zinc-900">Carteira de Clientes</h3>
+                      <div className="flex gap-2 items-center">
+                        <div className="relative">
+                          <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            placeholder="Buscar cliente por nome ou telefone..."
+                            className="pl-9 pr-4 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 w-72"
+                          />
+                          {searchQuery && (
+                            <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 hover:bg-zinc-100 rounded-full">
+                              <X className="w-3.5 h-3.5 text-zinc-400" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                        <tr>
+                          <th className="p-4 font-semibold">Cliente</th>
+                          <th className="p-4 font-semibold">Contato</th>
+                          <th className="p-4 font-semibold">Total Compras</th>
+                          <th className="p-4 font-semibold">Valor Total LTV</th>
+                          <th className="p-4 font-semibold text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-black/5 text-sm">
+                        {customers
+                          .filter(c => 
+                            c.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                            c.phone.includes(searchQuery.replace(/\D/g, ''))
+                          )
+                          .map(customer => (
+                          <tr key={customer.id} className="hover:bg-zinc-50/50 transition-colors">
+                            <td className="p-4">
+                              <div className="font-bold text-zinc-900">{customer.name}</div>
+                              <div className="text-xs text-zinc-500 flex gap-1 mt-1">
+                                {customer.services?.map(s => (
+                                  <span key={s} className="px-1.5 py-0.5 bg-zinc-100 rounded text-[10px]">{s}</span>
+                                ))}
+                              </div>
+                            </td>
+                            <td className="p-4 font-medium text-zinc-600">{customer.phone}</td>
+                            <td className="p-4 font-bold text-zinc-900">{customer.total_purchases}</td>
+                            <td className="p-4 font-black text-emerald-600">
+                              R$ {(customer.total_spent || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            </td>
+                            <td className="p-4 text-right">
+                              <button 
+                                onClick={() => setViewingCustomer(customer)}
+                                className="px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-xs font-bold hover:bg-indigo-100 transition-colors"
+                              >
+                                Ver Ficha
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {customers.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="p-8 text-center text-zinc-500">
+                              Nenhum cliente registrado ainda. Eles aparecerão aqui quando você criar novas vendas.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {currentPage === 'contracts' && (
+                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                  <div className="p-6 border-b border-black/5 flex flex-col gap-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="font-bold text-zinc-900">Gestão de Contratos</h3>
+                      <div className="flex gap-2 items-center">
+                        <div className="relative">
+                          <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            placeholder="Buscar por telefone ou nome..."
+                            className="pl-9 pr-4 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 w-64"
+                          />
+                          {searchQuery && (
+                            <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 hover:bg-zinc-100 rounded-full">
+                              <X className="w-3.5 h-3.5 text-zinc-400" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                        <tr>
+                          <th className="p-4 font-semibold">Cliente/Serviço</th>
+                          <th className="p-4 font-semibold">Status</th>
+                          <th className="p-4 font-semibold">Ciclo / Valor</th>
+                          <th className="p-4 font-semibold">Próx. Cobrança</th>
+                          <th className="p-4 font-semibold text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-black/5 text-sm">
+                        {sales
+                          .filter(s => s.sale_type === SaleType.RECORRENTE)
+                          .filter(s => 
+                            s.phone.includes(searchQuery.replace(/\D/g, '')) || 
+                            s.name?.toLowerCase().includes(searchQuery.toLowerCase())
+                          )
+                          .sort((a, b) => new Date(a.next_billing_date || '').getTime() - new Date(b.next_billing_date || '').getTime())
+                          .map(sale => {
+                            const isOverdue = new Date() > new Date(`${sale.next_billing_date}T23:59:59`) && sale.contract_status === ContractStatus.ATIVO;
+                            return (
+                              <tr key={sale.id} className="hover:bg-zinc-50/50 transition-colors">
+                                <td className="p-4">
+                                  <div className="font-bold text-zinc-900">{sale.name}</div>
+                                  <div className="text-xs text-zinc-500">{sale.phone}</div>
+                                  <div className="mt-1 text-xs font-semibold text-indigo-600">{(sale.services || [sale.service]).join(', ')}</div>
+                                </td>
+                                <td className="p-4">
+                                  <span className={`px-2 py-1 rounded-md text-xs font-bold uppercase ${
+                                    sale.contract_status === ContractStatus.ATIVO ? 'bg-emerald-100 text-emerald-700' :
+                                    sale.contract_status === ContractStatus.INADIMPLENTE ? 'bg-red-100 text-red-700' :
+                                    sale.contract_status === ContractStatus.PAUSADO ? 'bg-amber-100 text-amber-700' :
+                                    'bg-zinc-100 text-zinc-700'
+                                  }`}>
+                                    {sale.contract_status}
+                                  </span>
+                                  {isOverdue && sale.contract_status !== ContractStatus.INADIMPLENTE && (
+                                    <span className="block mt-1 text-[10px] font-bold text-red-500 uppercase">Vencido!</span>
+                                  )}
+                                </td>
+                                <td className="p-4">
+                                  <div className="font-bold text-zinc-900 capitalize">{sale.billing_cycle}</div>
+                                  <div className="font-black text-xs text-emerald-600">R$ {sale.value.toLocaleString()}</div>
+                                </td>
+                                <td className="p-4 font-medium text-zinc-700">
+                                  {sale.next_billing_date ? new Date(`${sale.next_billing_date}T12:00:00`).toLocaleDateString() : '-'}
+                                </td>
+                                <td className="p-4 text-right space-x-2">
+                                  {sale.contract_status !== ContractStatus.ATIVO && sale.contract_status !== ContractStatus.CANCELADO && (
+                                    <button onClick={() => handleContractAction(sale.id, 'resume')} className="p-1 px-2 bg-emerald-50 text-emerald-600 rounded text-xs font-bold hover:bg-emerald-100 transition-colors">
+                                      Retomar
+                                    </button>
+                                  )}
+                                  {sale.contract_status === ContractStatus.ATIVO && (
+                                    <>
+                                      <button onClick={() => handleContractAction(sale.id, 'pay')} className="p-1 px-2 bg-indigo-50 text-indigo-600 rounded text-xs font-bold hover:bg-indigo-100 transition-colors">
+                                        Registrar Pagamento
+                                      </button>
+                                      <button onClick={() => handleContractAction(sale.id, 'inadimplente')} className="p-1 px-2 border border-red-200 text-red-600 rounded text-xs font-bold hover:bg-red-50 transition-colors">
+                                        Inadimplente?
+                                      </button>
+                                    </>
+                                  )}
+                                  {sale.contract_status !== ContractStatus.CANCELADO && (
+                                    <button onClick={() => handleContractAction(sale.id, 'cancel')} className="p-1 px-2 border border-zinc-300 text-zinc-600 rounded text-xs font-bold hover:bg-zinc-100 transition-colors">
+                                      Cancelar
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                        })}
+                        {sales.filter(s => s.sale_type === SaleType.RECORRENTE).length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="p-8 text-center text-zinc-500">
+                              Nenhum contrato recorrente registrado.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {currentPage === 'new-lead' && (
                 <div className="max-w-2xl mx-auto">
                   <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5">
                     <h3 className="text-2xl font-bold text-zinc-900 mb-8">Cadastrar Novo Lead</h3>
                     <form onSubmit={(e) => {
                       e.preventDefault();
+                      if (newLeadServices.length === 0) {
+                        showToast('Selecione pelo menos um serviço.', 'warning');
+                        return;
+                      }
                       const formData = new FormData(e.currentTarget);
                       handleAddLead({
                         phone: formData.get('phone'),
-                        service: formData.get('service'),
+                        services: newLeadServices,
+                        service: newLeadServices[0], // fallback for old UI components
                         value: Number(formData.get('value')),
+                        notes: formData.get('notes') || '',
                         created_at: formData.get('date') ? new Date(`${formData.get('date')}T12:00:00`).toISOString() : new Date().toISOString(),
-                        status: SaleStatus.AGUARDANDO
+                        status: SaleStatus.AGUARDANDO,
+                        sale_type: newLeadSaleType,
+                        billing_cycle: formData.get('billing_cycle'),
+                        contract_start: formData.get('contract_start')
                       });
+                      // Reset local states
+                      setNewLeadSaleType(SaleType.PONTUAL);
+                      setNewLeadServices([]);
                     }} className="space-y-6">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="space-y-2">
@@ -1770,16 +2348,71 @@ export default function App() {
                           <label className="text-sm font-semibold text-zinc-700">Telefone (WhatsApp)</label>
                           <input name="phone" type="text" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="(00) 00000-0000" />
                         </div>
-                        <div className="space-y-2">
-                          <label className="text-sm font-semibold text-zinc-700">Serviço</label>
-                          <select name="service" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none">
-                            {SERVICES.map(s => <option key={s} value={s}>{s}</option>)}
-                          </select>
+                        <div className="space-y-2 md:col-span-2">
+                          <label className="text-sm font-semibold text-zinc-700">Serviços Contratados (selecione um ou mais)</label>
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                            {SERVICES.map(s => (
+                              <label key={s} className={`flex items-center gap-2 p-3 rounded-xl border cursor-pointer transition-all ${newLeadServices.includes(s) ? 'border-indigo-500 bg-indigo-50 text-indigo-700 font-semibold' : 'border-zinc-200 hover:border-indigo-300'}`}>
+                                <input 
+                                  type="checkbox" 
+                                  className="hidden" 
+                                  checked={newLeadServices.includes(s)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) setNewLeadServices(prev => [...prev, s]);
+                                    else setNewLeadServices(prev => prev.filter(item => item !== s));
+                                  }}
+                                />
+                                {s}
+                              </label>
+                            ))}
+                          </div>
                         </div>
-                        <div className="space-y-2">
-                          <label className="text-sm font-semibold text-zinc-700">Valor da Venda (R$)</label>
+                        <div className="space-y-2 md:col-span-2">
+                          <label className="text-sm font-semibold text-zinc-700">Tipo de Venda</label>
+                          <div className="grid grid-cols-2 gap-4">
+                            <button
+                              type="button"
+                              onClick={() => setNewLeadSaleType(SaleType.PONTUAL)}
+                              className={`py-3 rounded-xl font-semibold transition-all border ${newLeadSaleType === SaleType.PONTUAL ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                            >
+                              Pontual
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setNewLeadSaleType(SaleType.RECORRENTE)}
+                              className={`py-3 rounded-xl font-semibold transition-all border ${newLeadSaleType === SaleType.RECORRENTE ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                            >
+                              Recorrente (Contrato)
+                            </button>
+                          </div>
+                        </div>
+                        
+                        {newLeadSaleType === SaleType.RECORRENTE && (
+                          <>
+                            <div className="space-y-2">
+                              <label className="text-sm font-semibold text-zinc-700">Ciclo de Cobrança</label>
+                              <select name="billing_cycle" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none">
+                                <option value="mensal">Mensal</option>
+                                <option value="trimestral">Trimestral</option>
+                                <option value="semestral">Semestral</option>
+                                <option value="anual">Anual</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-sm font-semibold text-zinc-700">Início do Contrato</label>
+                              <input name="contract_start" type="date" defaultValue={getLocalISODate()} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
+                            </div>
+                          </>
+                        )}
+
+                        <div className="space-y-2 md:col-span-2">
+                          <label className="text-sm font-semibold text-zinc-700">Valor {newLeadSaleType === SaleType.RECORRENTE ? 'do Contrato (R$/ciclo)' : 'da Venda (R$)'}</label>
                           <input name="value" type="number" step="0.01" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="0.00" />
                         </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-zinc-700">Observações</label>
+                        <textarea name="notes" rows={3} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none" placeholder="Anotações sobre o lead (opcional)" />
                       </div>
                       <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-indigo-100">
                         Salvar Lead
@@ -1794,7 +2427,22 @@ export default function App() {
                     <div className="p-6 border-b border-black/5 flex flex-col gap-4">
                       <div className="flex justify-between items-center">
                         <h3 className="font-bold text-zinc-900">Listagem de Vendas</h3>
-                        <div className="flex gap-2">
+                        <div className="flex gap-2 items-center">
+                          <div className="relative">
+                            <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="text"
+                              value={searchQuery}
+                              onChange={(e) => setSearchQuery(e.target.value)}
+                              placeholder="Buscar por telefone ou nome..."
+                              className="pl-9 pr-4 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 w-64"
+                            />
+                            {searchQuery && (
+                              <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 hover:bg-zinc-100 rounded-full">
+                                <X className="w-3.5 h-3.5 text-zinc-400" />
+                              </button>
+                            )}
+                          </div>
                           <button 
                             onClick={() => setShowFilters(!showFilters)}
                             className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all flex items-center gap-2 ${
@@ -2279,6 +2927,12 @@ export default function App() {
                             <p className="font-bold text-zinc-900">{user.commission || 0}%</p>
                           </div>
                         </div>
+                        {user.last_login_at && (
+                          <div className="pt-2 border-t border-black/5">
+                            <p className="text-[10px] text-zinc-400 uppercase font-bold">Último Acesso</p>
+                            <p className="text-xs text-zinc-600 font-medium">{new Date(user.last_login_at).toLocaleString('pt-BR')}</p>
+                          </div>
+                        )}
                         <div className="flex gap-2 pt-2">
                           <button 
                             onClick={() => setEditingSeller(user)}
@@ -2316,9 +2970,9 @@ export default function App() {
                                       try {
                                         await deleteDoc(doc(db, 'profiles', user.id));
                                         await addLog(currentUser, `Excluiu permanentemente o usuário ${user.name}`, user.id);
-                                        alert('Usuário excluído com sucesso.');
+                                        showToast('Usuário excluído com sucesso.', 'success');
                                       } catch (err: any) {
-                                        alert('Erro ao excluir usuário: ' + err.message);
+                                        showToast('Erro ao excluir usuário: ' + err.message, 'error');
                                       }
                                     }
                                   });
@@ -2326,6 +2980,15 @@ export default function App() {
                                 className="flex-1 py-2 bg-red-50 text-red-600 rounded-xl text-xs font-bold hover:bg-red-100 transition-all"
                               >
                                 Excluir
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setMassTransferringUser(user);
+                                  setMassTransferTargetId('');
+                                }}
+                                className="col-span-2 py-2 border border-indigo-200 text-indigo-600 rounded-xl text-xs font-bold hover:bg-indigo-50 transition-all"
+                              >
+                                Transferir Carteira
                               </button>
                             </>
                           )}
@@ -2343,6 +3006,23 @@ export default function App() {
                     <p className="text-zinc-500 text-sm mt-1">Importe ou exporte todos os leads do sistema.</p>
                   </div>
                   <div className="p-6 flex flex-col gap-6">
+                    <div className="bg-amber-50 p-6 rounded-2xl border border-amber-200 flex flex-col gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-amber-100 text-amber-600 rounded-xl flex items-center justify-center">
+                          <Download className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-zinc-900">Backup Completo (JSON)</h4>
+                          <p className="text-sm text-zinc-500">Baixe um backup completo com todas as vendas, usuários, comprovantes, pagamentos e logs.</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={handleBackup}
+                        className="w-fit bg-amber-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-amber-700 transition-colors"
+                      >
+                        Baixar Backup
+                      </button>
+                    </div>
                     <div className="bg-zinc-50 p-6 rounded-2xl border border-black/5 flex flex-col gap-4">
                       <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
@@ -2725,10 +3405,10 @@ export default function App() {
                                       updated_at: new Date().toISOString()
                                     });
                                     await addLog(currentUser, `Aprovou exclusão da venda ${sale.id}`, sale.id);
-                                    alert('Exclusão aprovada com sucesso!');
+                                    showToast('Exclusão aprovada com sucesso!', 'success');
                                   } catch (error) {
                                     console.error(error);
-                                    alert('Erro ao aprovar exclusão.');
+                                    showToast('Erro ao aprovar exclusão.', 'error');
                                   }
                                 }
                               }}
@@ -2745,10 +3425,10 @@ export default function App() {
                                       updated_at: new Date().toISOString()
                                     });
                                     await addLog(currentUser, `Rejeitou exclusão da venda ${sale.id}`, sale.id);
-                                    alert('Venda restaurada com sucesso!');
+                                    showToast('Venda restaurada com sucesso!', 'success');
                                   } catch (error) {
                                     console.error(error);
-                                    alert('Erro ao restaurar venda.');
+                                    showToast('Erro ao restaurar venda.', 'error');
                                   }
                                 }
                               }}
@@ -2976,7 +3656,7 @@ export default function App() {
                       setRemarketingSaleId(null);
                       setRemarketingDate('');
                     } else {
-                      alert('Por favor, selecione uma data.');
+                      showToast('Por favor, selecione uma data.', 'warning');
                     }
                   }}
                   className="w-full px-6 py-3 rounded-xl font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-all"
@@ -3172,6 +3852,7 @@ export default function App() {
                     service: formData.get('service'),
                     value: Number(formData.get('value')),
                     status: formData.get('status') as SaleStatus,
+                    notes: formData.get('notes') as string || '',
                   }, receiptFile);
                 }} className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
@@ -3220,6 +3901,17 @@ export default function App() {
                         {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
                       </select>
                     </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-zinc-700">Observações</label>
+                    <textarea 
+                      name="notes" 
+                      rows={2} 
+                      defaultValue={editingSale.notes || ''}
+                      className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none text-sm" 
+                      placeholder="Anotações sobre o lead (opcional)" 
+                    />
                   </div>
 
                   <div className="space-y-2">
@@ -3370,6 +4062,7 @@ export default function App() {
                 handleUpdateUser(editingSeller.id, {
                   daily_goal: Number(formData.get('daily_goal')),
                   commission: Number(formData.get('commission')),
+                  recurring_commission: Number(formData.get('recurring_commission')),
                   commissions,
                   pix_key: formData.get('pix_key') as string
                 });
@@ -3381,10 +4074,14 @@ export default function App() {
                     <input name="daily_goal" type="number" defaultValue={editingSeller.daily_goal || 0} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-semibold text-zinc-700">Comissão Padrão (%)</label>
+                    <label className="text-sm font-semibold text-zinc-700">Comissão (Pontual) (%)</label>
                     <input name="commission" type="number" defaultValue={editingSeller.commission || 0} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
                   </div>
-                  <div className="space-y-2 md:col-span-2">
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-zinc-700">Comissão Recorrente (%)</label>
+                    <input name="recurring_commission" type="number" defaultValue={editingSeller.recurring_commission || 0} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
+                  </div>
+                  <div className="space-y-2 md:col-span-1">
                     <label className="text-sm font-semibold text-zinc-700">Chave PIX</label>
                     <input name="pix_key" type="text" defaultValue={editingSeller.pix_key || ''} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="E-mail, CPF, Telefone ou Chave Aleatória" />
                   </div>
@@ -3507,7 +4204,7 @@ export default function App() {
                         <button 
                           onClick={() => {
                             navigator.clipboard.writeText(payingSeller.pix_key || '');
-                            alert('Chave PIX copiada!');
+                            showToast('Chave PIX copiada!', 'success');
                           }}
                           className="ml-3 px-3 py-1.5 bg-indigo-50 text-indigo-600 text-xs font-bold rounded-lg hover:bg-indigo-100 transition-all shrink-0"
                         >
@@ -3592,6 +4289,109 @@ export default function App() {
           </motion.div>
         </div>
       )}
+
+      {viewingCustomer && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white w-full max-w-3xl rounded-3xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]"
+          >
+            <div className="p-6 border-b border-black/5 flex justify-between items-center bg-zinc-50">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
+                  <UserCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-xl text-zinc-900">{viewingCustomer.name}</h3>
+                  <p className="text-sm text-zinc-500">{viewingCustomer.phone}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setViewingCustomer(null)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-zinc-200 text-zinc-500 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 flex flex-col gap-6">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-100">
+                  <p className="text-[10px] text-emerald-600 uppercase font-black tracking-wider mb-1">LTV (Lifetime Value)</p>
+                  <p className="font-black text-2xl text-emerald-700">R$ {viewingCustomer.total_spent.toLocaleString()}</p>
+                </div>
+                <div className="bg-indigo-50 p-4 rounded-2xl border border-indigo-100">
+                  <p className="text-[10px] text-indigo-600 uppercase font-black tracking-wider mb-1">Total Compras</p>
+                  <p className="font-black text-2xl text-indigo-700">{viewingCustomer.total_purchases}</p>
+                </div>
+                <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-200">
+                  <p className="text-[10px] text-zinc-500 uppercase font-black tracking-wider mb-1">Cliente Desde</p>
+                  <p className="font-bold text-lg text-zinc-800">{new Date(viewingCustomer.first_purchase_date).toLocaleDateString()}</p>
+                </div>
+                <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-200">
+                  <p className="text-[10px] text-zinc-500 uppercase font-black tracking-wider mb-1">Serviços</p>
+                  <p className="font-bold text-sm text-zinc-800 leading-tight">
+                    {viewingCustomer.services?.join(', ') || '-'}
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-zinc-900 mb-4 border-b pb-2">Histórico de Vendas / Contratos</h4>
+                <div className="flex flex-col gap-3">
+                  {sales
+                    .filter(s => s.customer_id === viewingCustomer.id)
+                    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                    .map(s => (
+                    <div key={s.id} className="border border-zinc-200 rounded-xl p-4 flex justify-between items-center hover:bg-zinc-50 transition-colors">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-bold text-zinc-900">{s.services ? s.services.join(', ') : s.service}</span>
+                          {s.sale_type === SaleType.RECORRENTE ? (
+                            <span className="px-2 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-bold rounded-md flex items-center gap-1">
+                              <Repeat className="w-3 h-3" /> RECORRENTE
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] font-bold rounded-md">
+                              PONTUAL
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-500">
+                          {new Date(s.created_at).toLocaleDateString()} • Vendedor: {users.find(u => u.id === s.vendedor_id)?.name || 'Desconhecido'}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-black text-zinc-900">R$ {s.value.toLocaleString()}</p>
+                        <p className={`text-[10px] font-bold mt-1 uppercase ${
+                          s.status === SaleStatus.PAGO ? 'text-emerald-600' : 
+                          s.status === SaleStatus.CANCELADO ? 'text-red-500' : 'text-amber-500'
+                        }`}>
+                          {s.status}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  {sales.filter(s => s.customer_id === viewingCustomer.id).length === 0 && (
+                    <p className="text-sm text-zinc-500 text-center py-4">Nenhuma venda explícita vinculada a este cliente.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="p-4 border-t bg-zinc-50 flex justify-end">
+              <button 
+                onClick={() => setViewingCustomer(null)}
+                className="px-6 py-2 bg-zinc-200 hover:bg-zinc-300 text-zinc-800 font-bold rounded-xl transition-all"
+              >
+                Fechar Ficha
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
     </div>
   );
 }

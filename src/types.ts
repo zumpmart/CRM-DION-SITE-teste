@@ -22,6 +22,31 @@ export enum ReceiptStatus {
   PAGO = "PAGO",
 }
 
+export enum SaleType {
+  PONTUAL = "PONTUAL",
+  RECORRENTE = "RECORRENTE",
+}
+
+export enum ContractStatus {
+  ATIVO = "ATIVO",
+  PAUSADO = "PAUSADO",
+  CANCELADO = "CANCELADO",
+  INADIMPLENTE = "INADIMPLENTE",
+}
+
+export interface Customer {
+  id: string;
+  name: string;
+  phone: string;
+  email?: string;
+  first_purchase_date: string;
+  total_spent: number;
+  total_purchases: number;
+  services: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface UserProfile {
   id: string;
   name: string;
@@ -30,10 +55,12 @@ export interface UserProfile {
   daily_goal: number;
   commission: number;
   commissions?: Record<string, number>;
+  recurring_commission?: number;
   pix_key?: string;
   photo_url?: string;
   status: "ATIVO" | "INATIVO";
   created_at: string;
+  last_login_at?: string;
 }
 
 export interface Sale {
@@ -41,19 +68,31 @@ export interface Sale {
   name?: string;
   phone: string;
   service: string;
+  services?: string[];
   value: number;
   status: SaleStatus;
   previous_status?: SaleStatus;
   vendedor_id: string;
+  customer_id?: string;
+  is_returning_customer?: boolean;
+  sale_type?: SaleType;
+  // Recurring contract fields
+  billing_cycle?: 'mensal' | 'trimestral' | 'semestral' | 'anual';
+  contract_start?: string;
+  contract_end?: string;
+  next_billing_date?: string;
+  contract_status?: ContractStatus;
+  //
   transfer_to?: string | null;
   return_date?: string;
   created_at: string;
   updated_at: string;
   paid_at?: string;
   commission_paid?: boolean;
-  receipt_id?: string; // Virtual field or joined
+  receipt_id?: string;
   deleted_at?: string;
   deleted_by?: string;
+  notes?: string;
 }
 
 export interface Receipt {
