@@ -229,8 +229,13 @@ export default function App() {
   const [customerVendorFilter, setCustomerVendorFilter] = useState<string>('');
   const [customerDateFrom, setCustomerDateFrom] = useState<string>('');
   const [customerDateTo, setCustomerDateTo] = useState<string>('');
+  const [customerSortBy, setCustomerSortBy] = useState<'name' | 'spent_desc' | 'spent_asc' | 'purchases_desc' | 'purchases_asc' | 'recent'>('recent');
   const [duplicateCustomerFound, setDuplicateCustomerFound] = useState<Customer | null>(null);
   const [pendingLeadData, setPendingLeadData] = useState<any>(null);
+  const [newSaleSearchPhone, setNewSaleSearchPhone] = useState<string>('');
+  const [newSaleSelectedCustomer, setNewSaleSelectedCustomer] = useState<Customer | null>(null);
+  const [newSaleSaleType, setNewSaleSaleType] = useState<SaleType>(SaleType.PONTUAL);
+  const [newSaleServices, setNewSaleServices] = useState<string[]>([]);
 
   const clearFilters = () => {
     setFilters({
@@ -1152,6 +1157,36 @@ export default function App() {
     }
   };
 
+  const handleDeleteCustomer = async (customerId: string, customerName: string) => {
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
+    setConfirmInput('');
+    setConfirmModal({
+      title: '⚠️ Excluir Cliente',
+      message: `Você está prestes a excluir permanentemente o cliente "${customerName}". Esta ação não pode ser desfeita.`,
+      confirmText: 'Continuar',
+      cancelText: 'Cancelar',
+      onConfirm: () => {
+        setConfirmInput('');
+        setConfirmModal({
+          title: '🚨 Confirmação Final',
+          message: `Para excluir "${customerName}" permanentemente, digite EXCLUIR abaixo.`,
+          requireInput: 'EXCLUIR',
+          confirmText: 'Excluir Permanentemente',
+          cancelText: 'Cancelar',
+          onConfirm: async () => {
+            try {
+              await deleteDoc(doc(db, 'customers', customerId));
+              await addLog(currentUser!, `Excluiu o cliente ${customerName} (${customerId})`, customerId);
+              showToast(`Cliente "${customerName}" excluído com sucesso!`, 'success');
+            } catch (error: any) {
+              showToast('Erro ao excluir cliente: ' + error.message, 'error');
+            }
+          }
+        });
+      }
+    });
+  };
+
   const handleRejectDeletion = async (sale: Sale) => {
     if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR && currentUser.role !== UserRole.GERENTE)) return;
     try {
@@ -1701,19 +1736,20 @@ export default function App() {
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
+    { id: 'new-sale', label: 'Nova Venda', icon: Plus, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
+    { id: 'sales', label: currentUser.role === UserRole.VENDEDOR ? 'Fluxo de Vendas' : 'Todas as Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'customers', label: 'Clientes', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'contracts', label: 'Contratos', icon: Repeat, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: expiringContractsCount },
-    { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
-    { id: 'sales', label: currentUser.role === UserRole.VENDEDOR ? 'Minhas Vendas' : 'Todas as Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: remarketingBadgeCount },
-    { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN, UserRole.GERENTE] },
     { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN, UserRole.GERENTE] },
     { id: 'data-hub', label: 'Central de Dados', icon: Database, roles: [UserRole.ADMIN, UserRole.GERENTE] },
     { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN, UserRole.GERENTE] },
     { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
   ];
 
   return (
@@ -2220,7 +2256,7 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-                    <div className="flex gap-2 flex-wrap">
+                    <div className="flex gap-2 flex-wrap items-center">
                       <select 
                         value={customerVendorFilter}
                         onChange={(e) => setCustomerVendorFilter(e.target.value)}
@@ -2230,6 +2266,18 @@ export default function App() {
                         {users.filter(u => u.role !== UserRole.ADMIN).map(u => (
                           <option key={u.id} value={u.id}>{u.name}</option>
                         ))}
+                      </select>
+                      <select
+                        value={customerSortBy}
+                        onChange={(e) => setCustomerSortBy(e.target.value as any)}
+                        className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                      >
+                        <option value="recent">Mais Recentes</option>
+                        <option value="spent_desc">Maior Gasto</option>
+                        <option value="spent_asc">Menor Gasto</option>
+                        <option value="purchases_desc">Mais Compras</option>
+                        <option value="purchases_asc">Menos Compras</option>
+                        <option value="name">Nome (A-Z)</option>
                       </select>
                       <input 
                         type="date"
@@ -2271,6 +2319,17 @@ export default function App() {
                             const matchesDateTo = !customerDateTo || custDate <= customerDateTo;
                             return matchesSearch && matchesVendor && matchesDateFrom && matchesDateTo;
                           })
+                          .sort((a, b) => {
+                            switch (customerSortBy) {
+                              case 'spent_desc': return (b.total_spent || 0) - (a.total_spent || 0);
+                              case 'spent_asc': return (a.total_spent || 0) - (b.total_spent || 0);
+                              case 'purchases_desc': return (b.total_purchases || 0) - (a.total_purchases || 0);
+                              case 'purchases_asc': return (a.total_purchases || 0) - (b.total_purchases || 0);
+                              case 'name': return a.name.localeCompare(b.name);
+                              case 'recent':
+                              default: return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+                            }
+                          })
                           .map(customer => (
                           <tr key={customer.id} className="hover:bg-zinc-50/50 transition-colors">
                             <td className="p-4">
@@ -2286,13 +2345,21 @@ export default function App() {
                             <td className="p-4 font-black text-emerald-600">
                               R$ {(customer.total_spent || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                             </td>
-                            <td className="p-4 text-right">
+                            <td className="p-4 text-right flex gap-2 justify-end">
                               <button 
                                 onClick={() => setViewingCustomer(customer)}
                                 className="px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-xs font-bold hover:bg-indigo-100 transition-colors"
                               >
                                 Ver Ficha
                               </button>
+                              {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+                                <button 
+                                  onClick={() => handleDeleteCustomer(customer.id, customer.name)}
+                                  className="px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors"
+                                >
+                                  Excluir
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -2525,6 +2592,224 @@ export default function App() {
                         Salvar Lead
                       </button>
                     </form>
+                  </div>
+                </div>
+              )}
+
+              {currentPage === 'new-sale' && (
+                <div className="max-w-2xl mx-auto space-y-6">
+                  <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5">
+                    <h3 className="text-2xl font-bold text-zinc-900 mb-2">Nova Venda</h3>
+                    <p className="text-sm text-zinc-500 mb-6">Adicione uma venda a um cliente já cadastrado. Busque pelo número de telefone.</p>
+
+                    {/* Search */}
+                    <div className="relative mb-6">
+                      <Search className="w-5 h-5 text-zinc-400 absolute left-4 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={newSaleSearchPhone}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setNewSaleSearchPhone(val);
+                          // Auto-select customer if exact match
+                          const normalized = val.replace(/\D/g, '');
+                          if (normalized.length >= 8) {
+                            const found = customers.find(c => c.phone.replace(/\D/g, '').includes(normalized));
+                            setNewSaleSelectedCustomer(found || null);
+                          } else {
+                            setNewSaleSelectedCustomer(null);
+                          }
+                        }}
+                        placeholder="Digite o telefone do cliente..."
+                        className="w-full pl-12 pr-10 py-4 rounded-2xl border-2 border-zinc-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none text-lg font-medium transition-all"
+                      />
+                      {newSaleSearchPhone && (
+                        <button onClick={() => { setNewSaleSearchPhone(''); setNewSaleSelectedCustomer(null); }} className="absolute right-4 top-1/2 -translate-y-1/2 p-1 hover:bg-zinc-100 rounded-full">
+                          <X className="w-4 h-4 text-zinc-400" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Search Results */}
+                    {newSaleSearchPhone.replace(/\D/g, '').length >= 3 && !newSaleSelectedCustomer && (
+                      <div className="mb-6">
+                        {(() => {
+                          const normalized = newSaleSearchPhone.replace(/\D/g, '');
+                          const results = customers.filter(c => c.phone.replace(/\D/g, '').includes(normalized));
+                          if (results.length === 0) return (
+                            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+                              <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                              <div>
+                                <p className="font-bold text-amber-900 text-sm">Nenhum cliente encontrado</p>
+                                <p className="text-xs text-amber-700 mt-1">Cadastre o cliente primeiro em <button onClick={() => setCurrentPage('new-lead')} className="font-bold underline">Novo Lead</button>.</p>
+                              </div>
+                            </div>
+                          );
+                          return (
+                            <div className="space-y-2">
+                              <p className="text-xs font-bold text-zinc-400 uppercase">Resultados ({results.length})</p>
+                              {results.slice(0, 5).map(c => (
+                                <button
+                                  key={c.id}
+                                  onClick={() => setNewSaleSelectedCustomer(c)}
+                                  className="w-full text-left p-4 bg-zinc-50 hover:bg-indigo-50 border border-zinc-200 hover:border-indigo-300 rounded-2xl transition-all flex justify-between items-center"
+                                >
+                                  <div>
+                                    <p className="font-bold text-zinc-900">{c.name}</p>
+                                    <p className="text-sm text-zinc-500">{c.phone}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-xs font-bold text-emerald-600">R$ {(c.total_spent || 0).toLocaleString()}</p>
+                                    <p className="text-[10px] text-zinc-400">{c.total_purchases} compra(s)</p>
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+
+                    {/* Selected Customer Card */}
+                    {newSaleSelectedCustomer && (
+                      <div className="mb-6">
+                        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-5">
+                          <div className="flex justify-between items-start mb-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center">
+                                <UserCheck className="w-5 h-5 text-emerald-600" />
+                              </div>
+                              <div>
+                                <p className="font-bold text-zinc-900">{newSaleSelectedCustomer.name}</p>
+                                <p className="text-sm text-zinc-500">{newSaleSelectedCustomer.phone}</p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => setNewSaleSelectedCustomer(null)}
+                              className="p-1.5 hover:bg-emerald-100 rounded-lg transition-colors"
+                            >
+                              <X className="w-4 h-4 text-zinc-400" />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-3 gap-3">
+                            <div className="bg-white/70 p-3 rounded-xl">
+                              <p className="text-[10px] text-zinc-500 uppercase font-bold">LTV</p>
+                              <p className="font-black text-emerald-700">R$ {(newSaleSelectedCustomer.total_spent || 0).toLocaleString()}</p>
+                            </div>
+                            <div className="bg-white/70 p-3 rounded-xl">
+                              <p className="text-[10px] text-zinc-500 uppercase font-bold">Compras</p>
+                              <p className="font-black text-zinc-800">{newSaleSelectedCustomer.total_purchases}</p>
+                            </div>
+                            <div className="bg-white/70 p-3 rounded-xl">
+                              <p className="text-[10px] text-zinc-500 uppercase font-bold">Serviços</p>
+                              <p className="font-bold text-xs text-zinc-700 leading-tight">{newSaleSelectedCustomer.services?.join(', ') || '-'}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Sale Form (only if customer selected) */}
+                    {newSaleSelectedCustomer && (
+                      <form onSubmit={(e) => {
+                        e.preventDefault();
+                        if (newSaleServices.length === 0) {
+                          showToast('Selecione pelo menos um serviço.', 'warning');
+                          return;
+                        }
+                        const formData = new FormData(e.currentTarget);
+                        const leadData = {
+                          phone: newSaleSelectedCustomer!.phone,
+                          services: newSaleServices,
+                          service: newSaleServices[0],
+                          value: Number(formData.get('value')),
+                          notes: formData.get('notes') || '',
+                          created_at: new Date().toISOString(),
+                          status: SaleStatus.AGUARDANDO,
+                          sale_type: newSaleSaleType,
+                          billing_cycle: formData.get('billing_cycle'),
+                          contract_start: formData.get('contract_start')
+                        };
+                        proceedWithLead(leadData, newSaleSelectedCustomer!);
+                        // Reset
+                        setNewSaleSearchPhone('');
+                        setNewSaleSelectedCustomer(null);
+                        setNewSaleSaleType(SaleType.PONTUAL);
+                        setNewSaleServices([]);
+                      }} className="space-y-6 border-t border-black/5 pt-6">
+                        <div className="space-y-2">
+                          <label className="text-sm font-semibold text-zinc-700">Serviços Contratados (selecione um ou mais)</label>
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                            {SERVICES.map(s => (
+                              <label key={s} className={`flex items-center gap-2 p-3 rounded-xl border cursor-pointer transition-all ${newSaleServices.includes(s) ? 'border-indigo-500 bg-indigo-50 text-indigo-700 font-semibold' : 'border-zinc-200 hover:border-indigo-300'}`}>
+                                <input
+                                  type="checkbox"
+                                  className="hidden"
+                                  checked={newSaleServices.includes(s)}
+                                  onChange={(ev) => {
+                                    if (ev.target.checked) setNewSaleServices(prev => [...prev, s]);
+                                    else setNewSaleServices(prev => prev.filter(item => item !== s));
+                                  }}
+                                />
+                                {s}
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="text-sm font-semibold text-zinc-700">Tipo de Venda</label>
+                          <div className="grid grid-cols-2 gap-4">
+                            <button
+                              type="button"
+                              onClick={() => setNewSaleSaleType(SaleType.PONTUAL)}
+                              className={`py-3 rounded-xl font-semibold transition-all border ${newSaleSaleType === SaleType.PONTUAL ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                            >
+                              Pontual
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setNewSaleSaleType(SaleType.RECORRENTE)}
+                              className={`py-3 rounded-xl font-semibold transition-all border ${newSaleSaleType === SaleType.RECORRENTE ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'}`}
+                            >
+                              Recorrente (Contrato)
+                            </button>
+                          </div>
+                        </div>
+
+                        {newSaleSaleType === SaleType.RECORRENTE && (
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <label className="text-sm font-semibold text-zinc-700">Ciclo de Cobrança</label>
+                              <select name="billing_cycle" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none">
+                                <option value="mensal">Mensal</option>
+                                <option value="trimestral">Trimestral</option>
+                                <option value="semestral">Semestral</option>
+                                <option value="anual">Anual</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-sm font-semibold text-zinc-700">Início do Contrato</label>
+                              <input name="contract_start" type="date" defaultValue={getLocalISODate()} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <label className="text-sm font-semibold text-zinc-700">Valor {newSaleSaleType === SaleType.RECORRENTE ? 'do Contrato (R$/ciclo)' : 'da Venda (R$)'}</label>
+                          <input name="value" type="number" step="0.01" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="0.00" />
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="text-sm font-semibold text-zinc-700">Observações</label>
+                          <textarea name="notes" rows={3} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none" placeholder="Anotações sobre a venda (opcional)" />
+                        </div>
+
+                        <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-emerald-100">
+                          Registrar Venda
+                        </button>
+                      </form>
+                    )}
                   </div>
                 </div>
               )}
@@ -4554,8 +4839,9 @@ export default function App() {
               <button
                 disabled={!!confirmModal.requireInput && confirmInput !== confirmModal.requireInput}
                 onClick={() => {
-                  confirmModal.onConfirm();
+                  const cb = confirmModal.onConfirm;
                   setConfirmModal(null);
+                  setTimeout(() => cb(), 0);
                 }}
                 className="px-6 py-3 rounded-xl font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
@@ -4782,6 +5068,22 @@ export default function App() {
                 <div>
                   <span className="block">Ver Ficha do Cliente</span>
                   <span className="text-xs font-normal text-indigo-400">Abrir a ficha completa antes de decidir</span>
+                </div>
+              </button>
+              <button 
+                onClick={() => {
+                  setNewSaleSearchPhone(duplicateCustomerFound!.phone);
+                  setNewSaleSelectedCustomer(duplicateCustomerFound);
+                  setDuplicateCustomerFound(null);
+                  setPendingLeadData(null);
+                  setCurrentPage('new-sale');
+                }}
+                className="w-full px-4 py-3 bg-amber-50 hover:bg-amber-100 text-amber-700 font-bold rounded-xl transition-all text-left flex items-center gap-3"
+              >
+                <PlusCircle className="w-5 h-5 flex-shrink-0" />
+                <div>
+                  <span className="block">Ir para Nova Venda</span>
+                  <span className="text-xs font-normal text-amber-500">Abrir a aba de nova venda com este cliente</span>
                 </div>
               </button>
               <button 
