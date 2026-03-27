@@ -138,6 +138,61 @@ const toLocalDateString = (isoString?: string) => {
 
 const SERVICES = ['Logotipo', 'Flayer', 'Faixada', 'Site', 'Outros'];
 
+// --- Status Label Map (visual only, DB values unchanged) ---
+const STATUS_LABELS: Record<string, string> = {
+  [SaleStatus.AGUARDANDO]: 'Atendimento Iniciado',
+  [SaleStatus.PENDENTE]: 'Projeto Iniciado',
+  [SaleStatus.REMARKETING]: 'REMARKETING',
+  [SaleStatus.PAGO]: 'PAGO',
+  [SaleStatus.CANCELADO]: 'CANCELADO',
+  [SaleStatus.ARQUIVADO]: 'ARQUIVADO',
+  [SaleStatus.EXCLUSAO_SOLICITADA]: 'AGUARDANDO EXCLUSÃO',
+  [SaleStatus.DELETED]: 'DELETED',
+};
+const getStatusLabel = (status: string) => STATUS_LABELS[status] || status;
+
+// Statuses hidden from Kanban/List columns
+const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO];
+
+// --- Stale AGUARDANDO detection (>8h) ---
+const STALE_HOURS = 8;
+const isStaleAguardando = (sale: Sale) => {
+  if (sale.status !== SaleStatus.AGUARDANDO) return false;
+  const elapsed = Date.now() - new Date(sale.created_at).getTime();
+  return elapsed > STALE_HOURS * 60 * 60 * 1000;
+};
+
+const getStaleHours = (sale: Sale) => {
+  const elapsed = Date.now() - new Date(sale.created_at).getTime();
+  return Math.floor(elapsed / (60 * 60 * 1000));
+};
+
+// --- Remarketing Timer (8h to act, warning at 6-8h) ---
+const getRemarketingTimeInfo = (sale: Sale) => {
+  if (sale.status !== SaleStatus.REMARKETING) return null;
+  const elapsedMs = Date.now() - new Date(sale.updated_at).getTime();
+  const elapsedHours = elapsedMs / (60 * 60 * 1000);
+  const remainingMs = Math.max(0, 8 * 60 * 60 * 1000 - elapsedMs);
+  const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
+  const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
+  return {
+    elapsedHours,
+    remainingHours,
+    remainingMinutes,
+    isWarning: elapsedHours >= 6 && elapsedHours < 8,
+    isExpired: elapsedHours >= 8,
+    label: elapsedHours >= 8
+      ? '⏰ Prazo expirado!'
+      : `${remainingHours}h ${remainingMinutes}m restantes`
+  };
+};
+
+// --- PAGO visibility: only show if paid today ---
+const isPagoVisibleInFlow = (sale: Sale) => {
+  if (sale.status !== SaleStatus.PAGO || !sale.paid_at) return false;
+  return toLocalDateString(sale.paid_at) >= getLocalISODate();
+};
+
 const calculateCommission = (sale: Sale, user?: UserProfile) => {
   if (!user) return 0;
   if (sale.sale_type === SaleType.RECORRENTE) {
@@ -236,6 +291,8 @@ export default function App() {
   const [newSaleSelectedCustomer, setNewSaleSelectedCustomer] = useState<Customer | null>(null);
   const [newSaleSaleType, setNewSaleSaleType] = useState<SaleType>(SaleType.PONTUAL);
   const [newSaleServices, setNewSaleServices] = useState<string[]>([]);
+  const [dashboardVendorFilter, setDashboardVendorFilter] = useState<string>('');
+  const [lastCleanupDate, setLastCleanupDate] = useState<string | null>(null);
 
   const clearFilters = () => {
     setFilters({
@@ -488,11 +545,29 @@ export default function App() {
     return () => unsubCustomers();
   }, [currentUser]);
 
+  // Cleanup date listener (Firestore-persisted)
+  useEffect(() => {
+    if (!currentUser) return;
+    const unsubCleanup = onSnapshot(doc(db, 'settings', 'cleanup'), (snap) => {
+      if (snap.exists()) {
+        setLastCleanupDate(snap.data().lastCleanupDate || null);
+      }
+    });
+    return () => unsubCleanup();
+  }, [currentUser]);
+
   // --- Background Cleanup Routine ---
   // TODO: Implement server-side job for data retention and cleanup
   useEffect(() => {
     // Cleanup removed from frontend to prevent destructive actions
   }, [currentUser]);
+
+  // --- Timer refresh for remarketing countdown and stale AGUARDANDO alerts ---
+  const [, setTimerTick] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => setTimerTick(t => t + 1), 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
@@ -513,6 +588,9 @@ export default function App() {
     await signOut(auth);
     setCurrentUser(null);
     setCurrentPage('dashboard');
+    setEmail('');
+    setPassword('');
+    setLoginError('');
   };
 
   const addLog = async (user: UserProfile, action: string, targetId?: string) => {
@@ -574,6 +652,15 @@ export default function App() {
       return { ...sale, receipt_id: existingReceipt?.id };
     });
   }, [sales, filters, receipts, currentUser, searchQuery]);
+
+  // --- Dynamic LTV: only count PAGO sales ---
+  const getCustomerLTV = useCallback((customerId: string) => {
+    const customerSales = sales.filter(s => s.customer_id === customerId && s.status === SaleStatus.PAGO);
+    return {
+      total_spent: customerSales.reduce((acc, s) => acc + s.value, 0),
+      total_purchases: customerSales.length,
+    };
+  }, [sales]);
 
   // Count remarketing leads due today or overdue
   const remarketingBadgeCount = useMemo(() => {
@@ -646,14 +733,20 @@ export default function App() {
     const start = dateRange.start || getLocalISODate();
     const end = dateRange.end || getLocalISODate();
     
+    // Apply dashboard vendor filter for admins
+    const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR || currentUser?.role === UserRole.GERENTE;
+    const dashboardSales = isAdminOrManager && dashboardVendorFilter
+      ? mySales.filter(s => s.vendedor_id === dashboardVendorFilter)
+      : mySales;
+
     // Leads created in this range
-    const createdInRange = mySales.filter(s => {
+    const createdInRange = dashboardSales.filter(s => {
       const date = toLocalDateString(s.created_at);
       return date >= start && date <= end;
     });
     
     // Revenue from sales PAID in this range
-    const paidInRange = mySales.filter(s => {
+    const paidInRange = dashboardSales.filter(s => {
       if (s.status !== SaleStatus.PAGO || !s.paid_at) return false;
       const date = toLocalDateString(s.paid_at);
       return date >= start && date <= end;
@@ -661,7 +754,7 @@ export default function App() {
     
     const dailyTotal = paidInRange.reduce((acc, s) => acc + s.value, 0);
     const targetMonth = start.substring(0, 7);
-    const monthlyTotal = mySales
+    const monthlyTotal = dashboardSales
       .filter(s => s.status === SaleStatus.PAGO && toLocalDateString(s.paid_at).startsWith(targetMonth))
       .reduce((acc, s) => acc + s.value, 0);
 
@@ -674,10 +767,13 @@ export default function App() {
 
     const conversionRate = createdInRange.length > 0 ? (createdInRange.filter(s => s.status === SaleStatus.PAGO).length / createdInRange.length) * 100 : 0;
 
-    const mrr = sales
+    const filteredForMRR = isAdminOrManager && dashboardVendorFilter
+      ? sales.filter(s => s.vendedor_id === dashboardVendorFilter)
+      : sales;
+    const mrr = filteredForMRR
       .filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO)
       .reduce((acc, s) => acc + s.value, 0);
-    const activeContracts = sales.filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO).length;
+    const activeContracts = filteredForMRR.filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO).length;
 
     return {
       dailyTotal,
@@ -689,7 +785,7 @@ export default function App() {
       conversionRate,
       goalProgress: currentUser?.daily_goal ? (dailyTotal / currentUser.daily_goal) * 100 : 0
     };
-  }, [mySales, currentUser, dateRange]);
+  }, [mySales, sales, currentUser, dateRange, dashboardVendorFilter]);
 
   const adminGoalTracking = useMemo(() => {
     if (currentUser?.role !== UserRole.ADMIN && currentUser?.role !== UserRole.GERENTE) return [];
@@ -1026,6 +1122,28 @@ export default function App() {
       return;
     }
 
+    if (newStatus === SaleStatus.ARQUIVADO) {
+      setConfirmInput('');
+      setConfirmModal({
+        title: 'Arquivar Lead?',
+        message: 'Este lead será removido do Fluxo de Vendas e não aparecerá mais no Kanban nem na Lista. Ele continuará visível na aba Clientes com todo o histórico.',
+        confirmText: 'Arquivar',
+        onConfirm: async () => {
+          try {
+            await updateDoc(doc(db, 'sales', saleId), { 
+              status: SaleStatus.ARQUIVADO, 
+              updated_at: new Date().toISOString() 
+            });
+            await addLog(currentUser, `Arquivou a venda ${saleId}`, saleId);
+            showToast('Lead arquivado com sucesso!', 'success');
+          } catch (error: any) {
+            showToast('Erro ao arquivar: ' + error.message, 'error');
+          }
+        }
+      });
+      return;
+    }
+
     if (newStatus === SaleStatus.EXCLUSAO_SOLICITADA) {
       if (!window.confirm('Tem certeza que deseja solicitar a EXCLUSÃO desta venda? Um administrador precisará aprovar.')) return;
     }
@@ -1106,7 +1224,7 @@ export default function App() {
         sale.service,
         sale.value.toString(),
         sale.status,
-        sale.return_date ? new Date(sale.return_date).toLocaleDateString() : ''
+        sale.return_date ? new Date(sale.return_date + 'T00:00:00').toLocaleDateString('pt-BR') : ''
       ])
     ].map(row => row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(",")).join("\n");
 
@@ -1159,25 +1277,40 @@ export default function App() {
 
   const handleDeleteCustomer = async (customerId: string, customerName: string) => {
     if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
+    const customerSales = sales.filter(s => s.customer_id === customerId);
+    const salesCount = customerSales.length;
+    const salesWarning = salesCount > 0 
+      ? `\n\n⚠️ Este cliente possui ${salesCount} venda(s) que também serão excluídas permanentemente do sistema.` 
+      : '';
     setConfirmInput('');
     setConfirmModal({
       title: '⚠️ Excluir Cliente',
-      message: `Você está prestes a excluir permanentemente o cliente "${customerName}". Esta ação não pode ser desfeita.`,
+      message: `Você está prestes a excluir permanentemente o cliente "${customerName}".${salesWarning}\n\nEsta ação não pode ser desfeita.`,
       confirmText: 'Continuar',
       cancelText: 'Cancelar',
       onConfirm: () => {
         setConfirmInput('');
         setConfirmModal({
           title: '🚨 Confirmação Final',
-          message: `Para excluir "${customerName}" permanentemente, digite EXCLUIR abaixo.`,
+          message: `Para excluir "${customerName}"${salesCount > 0 ? ` e suas ${salesCount} venda(s)` : ''} permanentemente, digite EXCLUIR abaixo.`,
           requireInput: 'EXCLUIR',
           confirmText: 'Excluir Permanentemente',
           cancelText: 'Cancelar',
           onConfirm: async () => {
             try {
+              // Delete all associated sales
+              for (const sale of customerSales) {
+                // Delete any receipts linked to this sale
+                const saleReceipts = receipts.filter(r => r.sale_id === sale.id);
+                for (const receipt of saleReceipts) {
+                  await deleteDoc(doc(db, 'receipts', receipt.id));
+                }
+                await deleteDoc(doc(db, 'sales', sale.id));
+              }
+              // Delete the customer
               await deleteDoc(doc(db, 'customers', customerId));
-              await addLog(currentUser!, `Excluiu o cliente ${customerName} (${customerId})`, customerId);
-              showToast(`Cliente "${customerName}" excluído com sucesso!`, 'success');
+              await addLog(currentUser!, `Excluiu o cliente ${customerName} (${customerId}) e ${salesCount} venda(s) associada(s)`, customerId);
+              showToast(`Cliente "${customerName}" e ${salesCount} venda(s) excluídos com sucesso!`, 'success');
             } catch (error: any) {
               showToast('Erro ao excluir cliente: ' + error.message, 'error');
             }
@@ -1739,7 +1872,7 @@ export default function App() {
     { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
     { id: 'new-sale', label: 'Nova Venda', icon: Plus, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
-    { id: 'sales', label: currentUser.role === UserRole.VENDEDOR ? 'Fluxo de Vendas' : 'Todas as Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'sales', label: 'Fluxo de Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'customers', label: 'Clientes', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
     { id: 'contracts', label: 'Contratos', icon: Repeat, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: expiringContractsCount },
     { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: remarketingBadgeCount },
@@ -1884,14 +2017,13 @@ export default function App() {
             <button onClick={() => { if (window.innerWidth < 768) { setMobileMenuOpen(!mobileMenuOpen); } else { setSidebarOpen(!sidebarOpen); } }} className="p-2 hover:bg-zinc-100 rounded-lg transition-all">
               <Menu className="w-5 h-5 text-zinc-500" />
             </button>
-            <h2 className="text-lg font-bold text-zinc-900 capitalize">{currentPage.replace('-', ' ')}</h2>
+            <h2 className="text-lg font-bold text-zinc-900 capitalize">{menuItems.find(item => item.id === currentPage)?.label || currentPage.replace('-', ' ')}</h2>
           </div>
         </header>
 
         {/* Cleanup Reminder Banner (every 15 days) */}
-        {currentUser.role === UserRole.ADMIN && (() => {
-          const lastCleanup = localStorage.getItem('lastCleanupDate');
-          const daysSince = lastCleanup ? Math.floor((Date.now() - new Date(lastCleanup).getTime()) / (1000 * 60 * 60 * 24)) : 999;
+        {currentUser.role === UserRole.ADMIN && (currentPage === 'dashboard' || currentPage === 'data-hub') && (() => {
+          const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
           return daysSince >= 15 ? (
             <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mx-4 mt-2 rounded-md shadow-sm flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -1957,21 +2089,37 @@ export default function App() {
                       <h3 className="text-2xl font-bold text-zinc-900">Resumo Operacional</h3>
                       <p className="text-zinc-500 text-sm">Acompanhe o desempenho em tempo real</p>
                     </div>
-                    <div className="flex items-center gap-2 bg-white p-2 rounded-2xl shadow-sm border border-black/5">
-                      <Calendar className="w-4 h-4 text-zinc-400 ml-2" />
-                      <input 
-                        type="date" 
-                        value={dateRange.start}
-                        onChange={(e) => setDateRange(prev => ({ ...prev, start: e.target.value }))}
-                        className="bg-transparent border-none text-sm font-bold text-zinc-700 outline-none"
-                      />
-                      <span className="text-zinc-400 text-sm">até</span>
-                      <input 
-                        type="date" 
-                        value={dateRange.end}
-                        onChange={(e) => setDateRange(prev => ({ ...prev, end: e.target.value }))}
-                        className="bg-transparent border-none text-sm font-bold text-zinc-700 outline-none pr-2"
-                      />
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || currentUser.role === UserRole.SUPERVISOR) && (
+                        <div className="bg-white p-2 rounded-2xl shadow-sm border border-black/5">
+                          <select
+                            value={dashboardVendorFilter}
+                            onChange={(e) => setDashboardVendorFilter(e.target.value)}
+                            className="bg-transparent border-none text-sm font-bold text-zinc-700 outline-none cursor-pointer px-2"
+                          >
+                            <option value="">👥 Todos</option>
+                            {users.filter(u => u.status === 'ATIVO').map(u => (
+                              <option key={u.id} value={u.id}>{u.id === currentUser.id ? `👤 ${u.name} (eu)` : u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 bg-white p-2 rounded-2xl shadow-sm border border-black/5">
+                        <Calendar className="w-4 h-4 text-zinc-400 ml-2" />
+                        <input 
+                          type="date" 
+                          value={dateRange.start}
+                          onChange={(e) => setDateRange(prev => ({ ...prev, start: e.target.value }))}
+                          className="bg-transparent border-none text-sm font-bold text-zinc-700 outline-none"
+                        />
+                        <span className="text-zinc-400 text-sm">até</span>
+                        <input 
+                          type="date" 
+                          value={dateRange.end}
+                          onChange={(e) => setDateRange(prev => ({ ...prev, end: e.target.value }))}
+                          className="bg-transparent border-none text-sm font-bold text-zinc-700 outline-none pr-2"
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -2033,11 +2181,11 @@ export default function App() {
 
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
-                      <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Aguardando</p>
+                      <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Atend. Iniciado</p>
                       <p className="text-xl font-black text-zinc-600">{stats.statusCounts[SaleStatus.AGUARDANDO]}</p>
                     </div>
                     <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
-                      <p className="text-[10px] font-bold text-amber-400 uppercase mb-1">Pendente</p>
+                      <p className="text-[10px] font-bold text-amber-400 uppercase mb-1">Proj. Iniciado</p>
                       <p className="text-xl font-black text-amber-600">{stats.statusCounts[SaleStatus.PENDENTE]}</p>
                     </div>
                     <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
@@ -2045,8 +2193,8 @@ export default function App() {
                       <p className="text-xl font-black text-emerald-600">{stats.statusCounts[SaleStatus.PAGO]}</p>
                     </div>
                     <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
-                      <p className="text-[10px] font-bold text-red-400 uppercase mb-1">Cancelado</p>
-                      <p className="text-xl font-black text-red-600">{stats.statusCounts[SaleStatus.CANCELADO]}</p>
+                      <p className="text-[10px] font-bold text-amber-500 uppercase mb-1">Remarketing</p>
+                      <p className="text-xl font-black text-amber-600">{stats.statusCounts[SaleStatus.REMARKETING] || 0}</p>
                     </div>
                   </div>
 
@@ -2144,7 +2292,7 @@ export default function App() {
                                       sale.status === SaleStatus.EXCLUSAO_SOLICITADA ? 'bg-zinc-800 text-zinc-100' :
                                       'bg-zinc-100 text-zinc-600'
                                     }`}>
-                                      {sale.status === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : sale.status}
+                                      {getStatusLabel(sale.status)}
                                     </span>
                                   </td>
                                 </tr>
@@ -2263,7 +2411,7 @@ export default function App() {
                         className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                       >
                         <option value="">Todos os Vendedores</option>
-                        {users.filter(u => u.role !== UserRole.ADMIN).map(u => (
+                        {users.filter(u => u.status === 'ATIVO').map(u => (
                           <option key={u.id} value={u.id}>{u.name}</option>
                         ))}
                       </select>
@@ -2277,7 +2425,6 @@ export default function App() {
                         <option value="spent_asc">Menor Gasto</option>
                         <option value="purchases_desc">Mais Compras</option>
                         <option value="purchases_asc">Menos Compras</option>
-                        <option value="name">Nome (A-Z)</option>
                       </select>
                       <input 
                         type="date"
@@ -2301,6 +2448,7 @@ export default function App() {
                         <tr>
                           <th className="p-4 font-semibold">Cliente</th>
                           <th className="p-4 font-semibold">Contato</th>
+                          <th className="p-4 font-semibold">Vendedor</th>
                           <th className="p-4 font-semibold">Total Compras</th>
                           <th className="p-4 font-semibold">Valor Total LTV</th>
                           <th className="p-4 font-semibold text-right">Ações</th>
@@ -2320,12 +2468,13 @@ export default function App() {
                             return matchesSearch && matchesVendor && matchesDateFrom && matchesDateTo;
                           })
                           .sort((a, b) => {
+                            const ltvA = getCustomerLTV(a.id);
+                            const ltvB = getCustomerLTV(b.id);
                             switch (customerSortBy) {
-                              case 'spent_desc': return (b.total_spent || 0) - (a.total_spent || 0);
-                              case 'spent_asc': return (a.total_spent || 0) - (b.total_spent || 0);
-                              case 'purchases_desc': return (b.total_purchases || 0) - (a.total_purchases || 0);
-                              case 'purchases_asc': return (a.total_purchases || 0) - (b.total_purchases || 0);
-                              case 'name': return a.name.localeCompare(b.name);
+                              case 'spent_desc': return ltvB.total_spent - ltvA.total_spent;
+                              case 'spent_asc': return ltvA.total_spent - ltvB.total_spent;
+                              case 'purchases_desc': return ltvB.total_purchases - ltvA.total_purchases;
+                              case 'purchases_asc': return ltvA.total_purchases - ltvB.total_purchases;
                               case 'recent':
                               default: return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
                             }
@@ -2333,7 +2482,32 @@ export default function App() {
                           .map(customer => (
                           <tr key={customer.id} className="hover:bg-zinc-50/50 transition-colors">
                             <td className="p-4">
-                              <div className="font-bold text-zinc-900">{customer.name}</div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <div className="font-bold text-zinc-900">{customer.name}</div>
+                                {sales
+                                  .filter(s => s.customer_id === customer.id && !KANBAN_HIDDEN_STATUSES.includes(s.status) && s.status !== SaleStatus.DELETED)
+                                  .filter(s => {
+                                    if (s.status === SaleStatus.PAGO) return isPagoVisibleInFlow(s);
+                                    if (s.status === SaleStatus.ARQUIVADO) return false;
+                                    return true;
+                                  })
+                                  .map(s => {
+                                    const stale = isStaleAguardando(s);
+                                    const colorClass = stale
+                                      ? 'text-red-600 bg-red-50 animate-pulse'
+                                      : s.status === SaleStatus.AGUARDANDO ? 'text-orange-600 bg-orange-50'
+                                      : s.status === SaleStatus.PENDENTE ? 'text-amber-600 bg-amber-50'
+                                      : s.status === SaleStatus.REMARKETING ? 'text-purple-600 bg-purple-50'
+                                      : s.status === SaleStatus.PAGO ? 'text-emerald-600 bg-emerald-50'
+                                      : 'text-zinc-500 bg-zinc-100';
+                                    return (
+                                      <span key={s.id} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${colorClass}`} title={`Venda: R$ ${s.value} - ${s.service}`}>
+                                        {stale ? '⚠️ ' : ''}{getStatusLabel(s.status)}
+                                      </span>
+                                    );
+                                  })
+                                }
+                              </div>
                               <div className="text-xs text-zinc-500 flex gap-1 mt-1">
                                 {customer.services?.map(s => (
                                   <span key={s} className="px-1.5 py-0.5 bg-zinc-100 rounded text-[10px]">{s}</span>
@@ -2341,9 +2515,17 @@ export default function App() {
                               </div>
                             </td>
                             <td className="p-4 font-medium text-zinc-600">{customer.phone}</td>
-                            <td className="p-4 font-bold text-zinc-900">{customer.total_purchases}</td>
+                            <td className="p-4 text-zinc-600 text-xs">
+                              {(() => {
+                                const firstSale = sales.find(s => s.customer_id === customer.id);
+                                if (!firstSale) return <span className="text-zinc-400">—</span>;
+                                const seller = users.find(u => u.id === firstSale.vendedor_id);
+                                return <span className="font-semibold">{seller?.name || 'Desconhecido'}</span>;
+                              })()}
+                            </td>
+                            <td className="p-4 font-bold text-zinc-900">{getCustomerLTV(customer.id).total_purchases}</td>
                             <td className="p-4 font-black text-emerald-600">
-                              R$ {(customer.total_spent || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              R$ {getCustomerLTV(customer.id).total_spent.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                             </td>
                             <td className="p-4 text-right flex gap-2 justify-end">
                               <button 
@@ -2365,7 +2547,7 @@ export default function App() {
                         ))}
                         {customers.length === 0 && (
                           <tr>
-                            <td colSpan={5} className="p-8 text-center text-zinc-500">
+                            <td colSpan={6} className="p-8 text-center text-zinc-500">
                               Nenhum cliente registrado ainda. Eles aparecerão aqui quando você criar novas vendas.
                             </td>
                           </tr>
@@ -2659,8 +2841,8 @@ export default function App() {
                                     <p className="text-sm text-zinc-500">{c.phone}</p>
                                   </div>
                                   <div className="text-right">
-                                    <p className="text-xs font-bold text-emerald-600">R$ {(c.total_spent || 0).toLocaleString()}</p>
-                                    <p className="text-[10px] text-zinc-400">{c.total_purchases} compra(s)</p>
+                                    <p className="text-xs font-bold text-emerald-600">R$ {getCustomerLTV(c.id).total_spent.toLocaleString()}</p>
+                                    <p className="text-[10px] text-zinc-400">{getCustomerLTV(c.id).total_purchases} compra(s)</p>
                                   </div>
                                 </button>
                               ))}
@@ -2694,11 +2876,11 @@ export default function App() {
                           <div className="grid grid-cols-3 gap-3">
                             <div className="bg-white/70 p-3 rounded-xl">
                               <p className="text-[10px] text-zinc-500 uppercase font-bold">LTV</p>
-                              <p className="font-black text-emerald-700">R$ {(newSaleSelectedCustomer.total_spent || 0).toLocaleString()}</p>
+                              <p className="font-black text-emerald-700">R$ {getCustomerLTV(newSaleSelectedCustomer.id).total_spent.toLocaleString()}</p>
                             </div>
                             <div className="bg-white/70 p-3 rounded-xl">
                               <p className="text-[10px] text-zinc-500 uppercase font-bold">Compras</p>
-                              <p className="font-black text-zinc-800">{newSaleSelectedCustomer.total_purchases}</p>
+                              <p className="font-black text-zinc-800">{getCustomerLTV(newSaleSelectedCustomer.id).total_purchases}</p>
                             </div>
                             <div className="bg-white/70 p-3 rounded-xl">
                               <p className="text-[10px] text-zinc-500 uppercase font-bold">Serviços</p>
@@ -2886,7 +3068,7 @@ export default function App() {
                                     className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                                   >
                                     <option value="">Todos</option>
-                                    {users.filter(u => u.role === UserRole.VENDEDOR).map(u => (
+                                    {users.map(u => (
                                       <option key={u.id} value={u.id}>{u.name}</option>
                                     ))}
                                   </select>
@@ -2901,7 +3083,7 @@ export default function App() {
                                 >
                                   <option value="">Todos</option>
                                   {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => (
-                                    <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>
+                                    <option key={s} value={s}>{getStatusLabel(s)}</option>
                                   ))}
                                 </select>
                               </div>
@@ -2943,8 +3125,14 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-black/5">
-                          {mySales.map((sale) => (
-                            <tr key={sale.id} className="hover:bg-zinc-50 transition-all">
+                          {mySales.filter(sale => {
+                            // Hide CANCELADO and ARQUIVADO from list
+                            if (KANBAN_HIDDEN_STATUSES.includes(sale.status as SaleStatus)) return false;
+                            // PAGO: only show if paid today
+                            if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale)) return false;
+                            return true;
+                          }).map((sale) => (
+                            <tr key={sale.id} className={`hover:bg-zinc-50 transition-all ${isStaleAguardando(sale as Sale) ? 'bg-red-50/40' : ''}`}>
                               <td className="px-6 py-4 text-sm text-zinc-500">{new Date(sale.created_at).toLocaleDateString()}</td>
                               {currentUser.role !== UserRole.VENDEDOR && (
                                 <td className="px-6 py-4 text-sm font-medium text-zinc-900">
@@ -2977,8 +3165,24 @@ export default function App() {
                                       'bg-zinc-100 text-zinc-600'
                                     }`}
                                   >
-                                    {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
+                                    {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.CANCELADO).map(s => <option key={s} value={s}>{getStatusLabel(s)}</option>)}
                                   </select>
+                                  {/* Stale AGUARDANDO alert in list */}
+                                  {isStaleAguardando(sale as Sale) && (
+                                    <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full w-fit animate-pulse">
+                                      ⚠️ Sem atendimento há {getStaleHours(sale as Sale)}h
+                                    </span>
+                                  )}
+                                  {/* Remarketing timer in list */}
+                                  {(() => {
+                                    const rmk = getRemarketingTimeInfo(sale as Sale);
+                                    if (!rmk) return null;
+                                    return (
+                                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full w-fit ${rmk.isExpired ? 'text-red-600 bg-red-50 animate-pulse' : rmk.isWarning ? 'text-amber-600 bg-amber-50 animate-pulse' : 'text-emerald-600 bg-emerald-50'}`}>
+                                        ⏱️ {rmk.label}
+                                      </span>
+                                    );
+                                  })()}
                                   {sale.transfer_to && sale.transfer_to !== currentUser?.id && (
                                     <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit">
                                       Aguardando aceite
@@ -3086,26 +3290,18 @@ export default function App() {
                   ) : (
                     <div className="p-6 overflow-x-auto">
                       <div className="flex gap-6 min-w-max pb-4">
-                        {Object.values(SaleStatus).filter(status => status !== SaleStatus.DELETED).map(status => {
+                        {Object.values(SaleStatus).filter(status => !KANBAN_HIDDEN_STATUSES.includes(status)).map(status => {
                           const statusSales = mySales.filter(s => {
                             if (s.status !== status) return false;
                             
-                            // Hide PAGO after 24h
-                            if (status === SaleStatus.PAGO && s.paid_at) {
-                              const hours = (new Date().getTime() - new Date(s.paid_at).getTime()) / 3600000;
-                              if (hours > 24) return false;
+                            // PAGO: only show if paid today
+                            if (status === SaleStatus.PAGO) {
+                              return isPagoVisibleInFlow(s);
                             }
-                            
-                            // Hide ARQUIVADO after 24h
+
+                            // ARQUIVADO: column visible as drop target but sales hidden immediately
                             if (status === SaleStatus.ARQUIVADO) {
-                              const hours = (new Date().getTime() - new Date(s.updated_at).getTime()) / 3600000;
-                              if (hours > 24) return false;
-                            }
-                            
-                            // Hide CANCELADO after 24h
-                            if (status === SaleStatus.CANCELADO) {
-                              const hours = (new Date().getTime() - new Date(s.updated_at).getTime()) / 3600000;
-                              if (hours > 24) return false;
+                              return false;
                             }
                             
                             return true;
@@ -3119,19 +3315,42 @@ export default function App() {
                             onDrop={(e) => handleDrop(e, status)}
                           >
                             <div className="p-4 border-b border-black/5 flex justify-between items-center bg-white rounded-t-2xl">
-                              <h4 className="font-bold text-sm text-zinc-700">{status === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : status}</h4>
+                              <h4 className="font-bold text-sm text-zinc-700">{getStatusLabel(status)}</h4>
                               <span className="bg-zinc-100 text-zinc-500 text-xs font-bold px-2 py-1 rounded-full">
                                 {statusSales.length}
                               </span>
                             </div>
                             <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-3">
-                              {statusSales.map(sale => (
+                              {statusSales.map(sale => {
+                                const stale = isStaleAguardando(sale);
+                                const rmkInfo = getRemarketingTimeInfo(sale);
+                                return (
                                 <div 
                                   key={sale.id}
                                   draggable
                                   onDragStart={(e) => handleDragStart(e, sale.id)}
-                                  className="bg-white p-4 rounded-xl border border-black/5 shadow-sm hover:shadow-md transition-all cursor-grab active:cursor-grabbing flex flex-col gap-3"
+                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all cursor-grab active:cursor-grabbing flex flex-col gap-3 ${stale ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isExpired ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isWarning ? 'border-amber-300 ring-1 ring-amber-200' : 'border-black/5'}`}
                                 >
+                                  {/* Stale AGUARDANDO alert */}
+                                  {stale && (
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg animate-pulse">
+                                        ⚠️ Sem atendimento há {getStaleHours(sale)}h
+                                      </span>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(sale.id, SaleStatus.REMARKETING); }}
+                                        className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-lg hover:bg-amber-100 transition-colors whitespace-nowrap"
+                                      >
+                                        → Remarketing
+                                      </button>
+                                    </div>
+                                  )}
+                                  {/* Remarketing timer */}
+                                  {rmkInfo && (
+                                    <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg w-fit ${rmkInfo.isExpired ? 'text-red-600 bg-red-50 animate-pulse' : rmkInfo.isWarning ? 'text-amber-600 bg-amber-50 animate-pulse' : 'text-emerald-600 bg-emerald-50'}`}>
+                                      ⏱️ {rmkInfo.label}
+                                    </div>
+                                  )}
                                   <div className="flex justify-between items-start">
                                     <div>
                                       <p className="font-bold text-zinc-900">{sale.phone}</p>
@@ -3142,7 +3361,7 @@ export default function App() {
                                   {sale.return_date && status === SaleStatus.REMARKETING && (
                                     <div className="flex items-center gap-1 text-xs font-medium text-amber-600 bg-amber-50 px-2 py-1 rounded-lg w-fit">
                                       <Calendar className="w-3 h-3" />
-                                      Retorno: {new Date(sale.return_date).toLocaleDateString()}
+                                      Retorno: {new Date(sale.return_date + 'T00:00:00').toLocaleDateString('pt-BR')}
                                     </div>
                                   )}
                                   <div className="flex justify-between items-center pt-2 border-t border-black/5">
@@ -3176,7 +3395,8 @@ export default function App() {
                                     </div>
                                   </div>
                                 </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           </div>
                           );
@@ -3509,6 +3729,7 @@ export default function App() {
                             const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
                             const oldReceipts = receipts.filter(r => r.created_at < cutoff);
                             if (oldReceipts.length === 0) {
+                              const now = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now }); setLastCleanupDate(now);
                               showToast('Nenhum comprovante com mais de 15 dias encontrado.', 'info');
                               return;
                             }
@@ -3518,7 +3739,7 @@ export default function App() {
                                 await deleteDoc(doc(db, 'receipts', r.id));
                               }
                               await addLog(currentUser, `Limpou ${oldReceipts.length} comprovantes antigos (>15 dias)`);
-                              localStorage.setItem('lastCleanupDate', new Date().toISOString());
+                              const nowCleanup = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: nowCleanup }); setLastCleanupDate(nowCleanup);
                               showToast(`${oldReceipts.length} comprovante(s) removido(s)!`, 'success');
                             } catch (err: any) {
                               showToast('Erro na limpeza: ' + err.message, 'error');
@@ -3533,6 +3754,7 @@ export default function App() {
                             const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
                             const oldLogs = logs.filter(l => l.created_at < cutoff);
                             if (oldLogs.length === 0) {
+                              const now2 = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now2 }); setLastCleanupDate(now2);
                               showToast('Nenhum log com mais de 15 dias encontrado.', 'info');
                               return;
                             }
@@ -3541,7 +3763,7 @@ export default function App() {
                               for (const l of oldLogs) {
                                 await deleteDoc(doc(db, 'audit_logs', l.id));
                               }
-                              localStorage.setItem('lastCleanupDate', new Date().toISOString());
+                              const now3 = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now3 }); setLastCleanupDate(now3);
                               showToast(`${oldLogs.length} log(s) removido(s)!`, 'success');
                             } catch (err: any) {
                               showToast('Erro na limpeza: ' + err.message, 'error');
@@ -3562,8 +3784,7 @@ export default function App() {
                   <div className="p-6 border-b border-black/5 flex justify-between items-center">
                     <h3 className="font-bold text-zinc-900">Logs de Auditoria</h3>
                     {(() => {
-                      const lastCleanup = localStorage.getItem('lastCleanupDate');
-                      const daysSince = lastCleanup ? Math.floor((Date.now() - new Date(lastCleanup).getTime()) / (1000 * 60 * 60 * 24)) : 999;
+                      const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
                       return daysSince >= 15 ? (
                         <span className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-full animate-pulse">
                           ⚠️ Limpeza pendente ({daysSince === 999 ? 'nunca feita' : `${daysSince} dias`})
@@ -3739,7 +3960,7 @@ export default function App() {
                         <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
                           <div className="flex flex-col gap-1">
                             <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
-                            <span className="text-sm text-zinc-500">{sale.service} - {new Date(sale.return_date!).toLocaleDateString('pt-BR')}</span>
+                            <span className="text-sm text-zinc-500">{sale.service} - {new Date(sale.return_date! + 'T00:00:00').toLocaleDateString('pt-BR')}</span>
                           </div>
                           <div className="flex gap-2">
                             <a 
@@ -3882,6 +4103,18 @@ export default function App() {
                           </tr>
                         ))}
                       </tbody>
+                      <tfoot>
+                        <tr className="bg-indigo-50/60 border-t-2 border-indigo-200">
+                          <td className="px-8 py-4" colSpan={2}>
+                            <span className="font-bold text-indigo-700 uppercase text-sm tracking-wider flex items-center gap-2">
+                              <DollarSign className="w-4 h-4" />
+                              Total {rankingFilter === 'daily' ? 'do Dia' : rankingFilter === 'weekly' ? 'da Semana' : rankingFilter === 'monthly' ? 'do Mês' : 'Geral'}
+                            </span>
+                          </td>
+                          <td className="px-8 py-4 font-bold text-indigo-700">{ranking.reduce((acc, r) => acc + r.count, 0)}</td>
+                          <td className="px-8 py-4 font-black text-indigo-700 text-right text-lg">R$ {ranking.reduce((acc, r) => acc + r.total, 0).toLocaleString()}</td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 </div>
@@ -3896,8 +4129,8 @@ export default function App() {
                       sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).map(sale => (
                         <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
                           <div className="flex flex-col gap-1">
-                            <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
-                            <span className="text-sm text-zinc-500">{sale.service} - Solicitado em {new Date(sale.updated_at).toLocaleDateString('pt-BR')}</span>
+                            <span className="font-bold text-zinc-900">📞 {sale.phone}</span>
+                            <span className="text-sm text-zinc-500">{sale.service} - Solicitado por {users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido'} em {new Date(sale.updated_at).toLocaleDateString('pt-BR')}</span>
                           </div>
                           <div className="flex gap-2">
                             <button 
@@ -4170,16 +4403,10 @@ export default function App() {
               <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <Calendar className="w-8 h-8 text-amber-600" />
               </div>
-              <h3 className="text-xl font-bold text-zinc-900 mb-2 text-center">Data de Retorno</h3>
-              <p className="text-zinc-500 mb-6 text-sm text-center">Selecione a data para retornar o contato com este cliente.</p>
-              
-              <div className="mb-8">
-                <input 
-                  type="date" 
-                  value={remarketingDate}
-                  onChange={(e) => setRemarketingDate(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
-                />
+              <h3 className="text-xl font-bold text-zinc-900 mb-2 text-center">Mover para Remarketing</h3>
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+                <p className="text-sm font-bold text-amber-700 mb-1">⏱️ Prazo de 8 horas</p>
+                <p className="text-xs text-amber-600">Você terá até 8 horas para enviar a primeira mensagem a este lead. Um alerta será exibido quando o prazo estiver próximo do fim.</p>
               </div>
 
               <div className="flex gap-3">
@@ -4194,15 +4421,11 @@ export default function App() {
                 </button>
                 <button 
                   onClick={() => {
-                    if (remarketingDate) {
-                      handleUpdateStatus(remarketingSaleId, SaleStatus.REMARKETING, false, remarketingDate);
-                      setRemarketingSaleId(null);
-                      setRemarketingDate('');
-                    } else {
-                      showToast('Por favor, selecione uma data.', 'warning');
-                    }
+                    handleUpdateStatus(remarketingSaleId, SaleStatus.REMARKETING, false, getLocalISODate());
+                    setRemarketingSaleId(null);
+                    setRemarketingDate('');
                   }}
-                  className="w-full px-6 py-3 rounded-xl font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-all"
+                  className="w-full px-6 py-3 rounded-xl font-bold text-white bg-amber-500 hover:bg-amber-600 transition-all"
                 >
                   Confirmar
                 </button>
@@ -4459,7 +4682,7 @@ export default function App() {
                         required 
                         className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
                       >
-                        {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => <option key={s} value={s}>{s === SaleStatus.EXCLUSAO_SOLICITADA ? 'AGUARDANDO EXCLUSÃO' : s}</option>)}
+                        {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.CANCELADO).map(s => <option key={s} value={s}>{getStatusLabel(s)}</option>)}
                       </select>
                     </div>
                   </div>
@@ -4881,11 +5104,11 @@ export default function App() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-100">
                   <p className="text-[10px] text-emerald-600 uppercase font-black tracking-wider mb-1">LTV (Lifetime Value)</p>
-                  <p className="font-black text-2xl text-emerald-700">R$ {viewingCustomer.total_spent.toLocaleString()}</p>
+                  <p className="font-black text-2xl text-emerald-700">R$ {getCustomerLTV(viewingCustomer.id).total_spent.toLocaleString()}</p>
                 </div>
                 <div className="bg-indigo-50 p-4 rounded-2xl border border-indigo-100">
                   <p className="text-[10px] text-indigo-600 uppercase font-black tracking-wider mb-1">Total Compras</p>
-                  <p className="font-black text-2xl text-indigo-700">{viewingCustomer.total_purchases}</p>
+                  <p className="font-black text-2xl text-indigo-700">{getCustomerLTV(viewingCustomer.id).total_purchases}</p>
                 </div>
                 <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-200">
                   <p className="text-[10px] text-zinc-500 uppercase font-black tracking-wider mb-1">Cliente Desde</p>
@@ -4928,9 +5151,10 @@ export default function App() {
                         <p className="font-black text-zinc-900">R$ {s.value.toLocaleString()}</p>
                         <p className={`text-[10px] font-bold mt-1 uppercase ${
                           s.status === SaleStatus.PAGO ? 'text-emerald-600' : 
-                          s.status === SaleStatus.CANCELADO ? 'text-red-500' : 'text-amber-500'
+                          s.status === SaleStatus.CANCELADO ? 'text-red-500' : 
+                          s.status === SaleStatus.ARQUIVADO ? 'text-zinc-400' : 'text-amber-500'
                         }`}>
-                          {s.status}
+                          {getStatusLabel(s.status)}
                         </p>
                       </div>
                     </div>
@@ -5022,12 +5246,12 @@ export default function App() {
               <div className="flex justify-between items-center mb-2">
                 <span className="font-bold text-zinc-900">{duplicateCustomerFound.name}</span>
                 <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
-                  {duplicateCustomerFound.total_purchases} compra{duplicateCustomerFound.total_purchases !== 1 ? 's' : ''}
+                  {getCustomerLTV(duplicateCustomerFound.id).total_purchases} compra{getCustomerLTV(duplicateCustomerFound.id).total_purchases !== 1 ? 's' : ''}
                 </span>
               </div>
               <p className="text-sm text-zinc-500">{duplicateCustomerFound.phone}</p>
               <p className="text-sm text-zinc-500 mt-1">
-                LTV: <strong className="text-emerald-600">R$ {(duplicateCustomerFound.total_spent || 0).toLocaleString()}</strong>
+                LTV: <strong className="text-emerald-600">R$ {getCustomerLTV(duplicateCustomerFound.id).total_spent.toLocaleString()}</strong>
               </p>
               {duplicateCustomerFound.services?.length > 0 && (
                 <div className="flex gap-1 mt-2 flex-wrap">
