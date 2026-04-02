@@ -42,12 +42,15 @@ import {
   UserCheck,
   Clock,
   Plus,
-  Eye
+  Eye,
+  Wallet,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper from 'react-easy-crop';
 import 'react-easy-crop/react-easy-crop.css';
 import { UserProfile, UserRole, Sale, SaleStatus, SaleType, ContractStatus, Customer, Receipt, ReceiptStatus, AuditLog, Payment } from './types';
+import { auditReceipt, generateImageHash } from './auditService';
 import { db, auth, storage, firebaseConfig } from './firebase';
 import { initializeApp } from 'firebase/app';
 import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, limit, or } from 'firebase/firestore';
@@ -158,12 +161,12 @@ const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO];
 const STALE_HOURS = 8;
 const isStaleAguardando = (sale: Sale) => {
   if (sale.status !== SaleStatus.AGUARDANDO) return false;
-  const elapsed = Date.now() - new Date(sale.created_at).getTime();
+  const elapsed = Date.now() - new Date(sale.updated_at).getTime();
   return elapsed > STALE_HOURS * 60 * 60 * 1000;
 };
 
 const getStaleHours = (sale: Sale) => {
-  const elapsed = Date.now() - new Date(sale.created_at).getTime();
+  const elapsed = Date.now() - new Date(sale.updated_at).getTime();
   return Math.floor(elapsed / (60 * 60 * 1000));
 };
 
@@ -189,8 +192,10 @@ const getRemarketingTimeInfo = (sale: Sale) => {
 
 // --- PAGO visibility: only show if paid today ---
 const isPagoVisibleInFlow = (sale: Sale) => {
-  if (sale.status !== SaleStatus.PAGO || !sale.paid_at) return false;
-  return toLocalDateString(sale.paid_at) >= getLocalISODate();
+  if (sale.status !== SaleStatus.PAGO) return false;
+  const paidRef = sale.paid_at || sale.updated_at;
+  if (!paidRef) return false;
+  return toLocalDateString(paidRef) >= getLocalISODate();
 };
 
 const calculateCommission = (sale: Sale, user?: UserProfile) => {
@@ -234,6 +239,7 @@ export default function App() {
   }, []);
   const [loading, setLoading] = useState(true);
   const [showUserModal, setShowUserModal] = useState(false);
+  const [viewingImageUrl, setViewingImageUrl] = useState<string | null>(null);
   const [confirmInput, setConfirmInput] = useState('');
   const [confirmModal, setConfirmModal] = useState<{
     title: string;
@@ -293,6 +299,20 @@ export default function App() {
   const [newSaleServices, setNewSaleServices] = useState<string[]>([]);
   const [dashboardVendorFilter, setDashboardVendorFilter] = useState<string>('');
   const [lastCleanupDate, setLastCleanupDate] = useState<string | null>(null);
+  const [receiptAuditFilter, setReceiptAuditFilter] = useState<'all' | 'approved' | 'divergent' | 'duplicate' | 'pending'>('all');
+  const [receiptDateFrom, setReceiptDateFrom] = useState<string>('');
+  const [receiptDateTo, setReceiptDateTo] = useState<string>('');
+  const [receiptVendorFilter, setReceiptVendorFilter] = useState<string>('');
+  const [paymentDateFrom, setPaymentDateFrom] = useState<string>('');
+  const [paymentDateTo, setPaymentDateTo] = useState<string>('');
+  const [paymentStatusFilter, setPaymentStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [receiptsLastSeen, setReceiptsLastSeen] = useState<string>(() => localStorage.getItem('receiptsLastSeen') || '');
+
+  // Count new receipts since last time the receipts page was viewed
+  const newReceiptsCount = useMemo(() => {
+    if (!receiptsLastSeen) return receipts.length;
+    return receipts.filter(r => r.created_at > receiptsLastSeen).length;
+  }, [receipts, receiptsLastSeen]);
 
   const clearFilters = () => {
     setFilters({
@@ -393,7 +413,7 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
 
-    const isAdminOrManager = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE;
+    const isAdminOrManager = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR;
     
     let unsubSales: any;
     let unsubSalesTransferred: any;
@@ -504,7 +524,7 @@ export default function App() {
       }, (error) => handleSyncError(error, 'Meus Comprovantes'));
     }
 
-    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) {
+    if (currentUser.role === UserRole.ADMIN) {
       unsubProfiles = onSnapshot(collection(db, 'profiles'), (snapshot) => {
         setUsers(snapshot.docs.map(doc => ({ ...(doc.data() as UserProfile), id: doc.id })));
       }, (error) => handleSyncError(error, 'Perfis'));
@@ -613,7 +633,7 @@ export default function App() {
     return sales.filter(sale => {
       if (sale.status === SaleStatus.DELETED) return false;
       
-      const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR || currentUser?.role === UserRole.GERENTE;
+      const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR;
       if (!isAdminOrManager) {
         const isOwner = sale.vendedor_id === currentUser?.id;
         const isTransferredToMe = sale.transfer_to === currentUser?.id;
@@ -670,7 +690,7 @@ export default function App() {
       s.status === SaleStatus.REMARKETING && 
       s.return_date && 
       toLocalDateString(s.return_date) <= today &&
-      (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || s.vendedor_id === currentUser.id)
+      (currentUser.role === UserRole.ADMIN || s.vendedor_id === currentUser.id)
     ).length;
   }, [sales, currentUser]);
 
@@ -703,9 +723,10 @@ export default function App() {
     const stats = users
       .map(u => {
         const userSales = sales.filter(s => {
-          if (s.vendedor_id !== u.id || s.status !== SaleStatus.PAGO || !s.paid_at) return false;
-          
-          const paidDate = toLocalDateString(s.paid_at);
+          if (s.vendedor_id !== u.id || s.status !== SaleStatus.PAGO) return false;
+          const paidRef = s.paid_at || s.updated_at;
+          if (!paidRef) return false;
+          const paidDate = toLocalDateString(paidRef);
           
           if (rankingFilter === 'daily') {
             return paidDate === today;
@@ -730,32 +751,40 @@ export default function App() {
   }, [sales, users, rankingFilter]);
 
   const stats = useMemo(() => {
-    const start = dateRange.start || getLocalISODate();
-    const end = dateRange.end || getLocalISODate();
+    const start = dateRange.start;
+    const end = dateRange.end;
+    const hasDateFilter = !!start || !!end;
     
     // Apply dashboard vendor filter for admins
-    const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR || currentUser?.role === UserRole.GERENTE;
+    const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR;
     const dashboardSales = isAdminOrManager && dashboardVendorFilter
       ? mySales.filter(s => s.vendedor_id === dashboardVendorFilter)
       : mySales;
 
-    // Leads created in this range
-    const createdInRange = dashboardSales.filter(s => {
+    // Leads created in this range (or all if no filter)
+    const createdInRange = hasDateFilter ? dashboardSales.filter(s => {
       const date = toLocalDateString(s.created_at);
-      return date >= start && date <= end;
-    });
+      if (start && date < start) return false;
+      if (end && date > end) return false;
+      return true;
+    }) : dashboardSales;
     
-    // Revenue from sales PAID in this range
+    // Revenue from sales PAID in this range (or all if no filter)
     const paidInRange = dashboardSales.filter(s => {
-      if (s.status !== SaleStatus.PAGO || !s.paid_at) return false;
-      const date = toLocalDateString(s.paid_at);
-      return date >= start && date <= end;
+      if (s.status !== SaleStatus.PAGO) return false;
+      const paidRef = s.paid_at || s.updated_at;
+      if (!paidRef) return false;
+      if (!hasDateFilter) return true;
+      const date = toLocalDateString(paidRef);
+      if (start && date < start) return false;
+      if (end && date > end) return false;
+      return true;
     });
     
     const dailyTotal = paidInRange.reduce((acc, s) => acc + s.value, 0);
-    const targetMonth = start.substring(0, 7);
+    const targetMonth = (start || getLocalISODate()).substring(0, 7);
     const monthlyTotal = dashboardSales
-      .filter(s => s.status === SaleStatus.PAGO && toLocalDateString(s.paid_at).startsWith(targetMonth))
+      .filter(s => s.status === SaleStatus.PAGO && toLocalDateString(s.paid_at || s.updated_at).startsWith(targetMonth))
       .reduce((acc, s) => acc + s.value, 0);
 
     const statusCounts = {
@@ -788,7 +817,7 @@ export default function App() {
   }, [mySales, sales, currentUser, dateRange, dashboardVendorFilter]);
 
   const adminGoalTracking = useMemo(() => {
-    if (currentUser?.role !== UserRole.ADMIN && currentUser?.role !== UserRole.GERENTE) return [];
+    if (!currentUser) return [];
     
     const start = dateRange.start || getLocalISODate();
     const end = dateRange.end || getLocalISODate();
@@ -797,8 +826,10 @@ export default function App() {
       .filter(u => u.role !== UserRole.SUPERVISOR)
       .map(u => {
         const sellerSales = sales.filter(s => {
-          if (s.vendedor_id !== u.id || s.status !== SaleStatus.PAGO || !s.paid_at) return false;
-          const date = toLocalDateString(s.paid_at);
+          if (s.vendedor_id !== u.id || s.status !== SaleStatus.PAGO) return false;
+          const paidRef = s.paid_at || s.updated_at;
+          if (!paidRef) return false;
+          const date = toLocalDateString(paidRef);
           return date >= start && date <= end;
         });
         
@@ -862,14 +893,31 @@ export default function App() {
   const handleContractAction = async (saleId: string, actionItem: 'pause' | 'resume' | 'cancel' | 'inadimplente' | 'pay') => {
     if (!currentUser) return;
     
-    // Double confirmation for cancel
+    // Confirmations for dangerous contract actions
     if (actionItem === 'cancel') {
-      if (!window.confirm('Tem certeza que deseja CANCELAR este contrato? Esta ação não pode ser desfeita facilmente.')) return;
+      setConfirmModal({
+        title: '⚠️ Cancelar Contrato',
+        message: 'Tem certeza que deseja CANCELAR este contrato? Esta ação não pode ser desfeita facilmente.',
+        confirmText: 'Cancelar Contrato',
+        onConfirm: () => executeContractAction(saleId, actionItem)
+      });
+      return;
     }
     if (actionItem === 'inadimplente') {
-      if (!window.confirm('Deseja marcar este contrato como INADIMPLENTE?')) return;
+      setConfirmModal({
+        title: '⚠️ Marcar Inadimplente',
+        message: 'Deseja marcar este contrato como INADIMPLENTE?',
+        confirmText: 'Confirmar',
+        onConfirm: () => executeContractAction(saleId, actionItem)
+      });
+      return;
     }
 
+    await executeContractAction(saleId, actionItem);
+  };
+
+  const executeContractAction = async (saleId: string, actionItem: string) => {
+    if (!currentUser) return;
     try {
       const saleRef = doc(db, 'sales', saleId);
       let updates: Partial<Sale> = { updated_at: new Date().toISOString() };
@@ -962,9 +1010,21 @@ export default function App() {
         s.vendedor_id === currentUser.id
       );
       if (recentDuplicate) {
-        if (!window.confirm(`Já existe um lead com este telefone registrado há poucos minutos. Deseja realmente criar um NOVO lead duplicado?`)) {
-          return;
-        }
+        setConfirmModal({
+          title: '⚠️ Lead Duplicado',
+          message: 'Já existe um lead com este telefone registrado há poucos minutos. Deseja realmente criar um NOVO lead duplicado?',
+          confirmText: 'Criar Mesmo Assim',
+          onConfirm: async () => {
+            const existingCustomer = customers.find(c => c.phone.replace(/\D/g, '') === normalizedPhone);
+            if (existingCustomer) {
+              setDuplicateCustomerFound(existingCustomer);
+              setPendingLeadData(leadData);
+            } else {
+              await proceedWithLead(leadData, null);
+            }
+          }
+        });
+        return;
       }
 
       // Check if customer already exists by phone
@@ -1067,6 +1127,12 @@ export default function App() {
         finalUpdates.paid_at = new Date().toISOString();
       }
 
+      // Clear receipt_rejected flag when sale is edited (value changed or new receipt)
+      if (sale?.receipt_rejected) {
+        finalUpdates.receipt_rejected = false;
+        finalUpdates.receipt_rejection_reason = null;
+      }
+
       await updateDoc(doc(db, 'sales', saleId), {
         ...finalUpdates,
         updated_at: new Date().toISOString()
@@ -1115,7 +1181,7 @@ export default function App() {
     if (!currentUser) return;
     
     const sale = sales.find(s => s.id === saleId);
-    const hasReceipt = receipts.some(r => r.sale_id === saleId);
+    const hasReceipt = receipts.some(r => r.sale_id === saleId && r.status !== ReceiptStatus.REJEITADO);
     
     if (newStatus === SaleStatus.PAGO && !hasReceipt && !forceUpdate) {
       setSalePendingReceipt(sale || null);
@@ -1145,7 +1211,68 @@ export default function App() {
     }
 
     if (newStatus === SaleStatus.EXCLUSAO_SOLICITADA) {
-      if (!window.confirm('Tem certeza que deseja solicitar a EXCLUSÃO desta venda? Um administrador precisará aprovar.')) return;
+      const otherActiveSales = sales.filter(s => 
+        s.customer_id === sale?.customer_id && 
+        s.id !== saleId && 
+        s.status !== SaleStatus.DELETED && 
+        s.status !== SaleStatus.EXCLUSAO_SOLICITADA
+      );
+      
+      if (otherActiveSales.length > 0) {
+        // Customer has other sales - warn and suggest archiving
+        setConfirmModal({
+          title: '⚠️ Cliente com outras vendas',
+          message: `Este cliente possui ${otherActiveSales.length} outra(s) venda(s) ativa(s). Recomendamos ARQUIVAR em vez de excluir. Se prosseguir com a exclusão, apenas esta venda será removida mas o cliente permanecerá.`,
+          confirmText: 'Solicitar Exclusão Mesmo Assim',
+          cancelText: 'Arquivar em vez disso',
+          onConfirm: async () => {
+            try {
+              await updateDoc(doc(db, 'sales', saleId), {
+                status: SaleStatus.EXCLUSAO_SOLICITADA,
+                previous_status: sale?.status,
+                updated_at: new Date().toISOString()
+              });
+              await addLog(currentUser, `Solicitou exclusão da venda ${saleId} (cliente tem ${otherActiveSales.length} outra(s) venda(s))`, saleId);
+              showToast('Solicitação de exclusão enviada ao admin.', 'info');
+            } catch (err: any) {
+              showToast('Erro: ' + err.message, 'error');
+            }
+          },
+          onCancel: async () => {
+            try {
+              await updateDoc(doc(db, 'sales', saleId), {
+                status: SaleStatus.ARQUIVADO,
+                updated_at: new Date().toISOString()
+              });
+              await addLog(currentUser, `Arquivou a venda ${saleId}`, saleId);
+              showToast('Lead arquivado com sucesso!', 'success');
+            } catch (err: any) {
+              showToast('Erro ao arquivar: ' + err.message, 'error');
+            }
+          }
+        });
+        return;
+      }
+      
+      setConfirmModal({
+        title: '🗑️ Solicitar Exclusão',
+        message: 'Tem certeza que deseja solicitar a EXCLUSÃO desta venda e do cliente? Um administrador precisará aprovar.',
+        confirmText: 'Solicitar Exclusão',
+        onConfirm: async () => {
+          try {
+            await updateDoc(doc(db, 'sales', saleId), {
+              status: SaleStatus.EXCLUSAO_SOLICITADA,
+              previous_status: sale?.status,
+              updated_at: new Date().toISOString()
+            });
+            await addLog(currentUser, `Solicitou exclusão da venda ${saleId}`, saleId);
+            showToast('Solicitação de exclusão enviada ao admin.', 'info');
+          } catch (err: any) {
+            showToast('Erro: ' + err.message, 'error');
+          }
+        }
+      });
+      return;
     }
 
     if (newStatus === SaleStatus.REMARKETING && !returnDate) {
@@ -1247,7 +1374,7 @@ export default function App() {
       const sale = sales.find(s => s.id === saleId);
       if (!sale) return;
 
-      if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE) {
+      if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR) {
         await updateDoc(doc(db, 'sales', saleId), {
           status: SaleStatus.DELETED,
           previous_status: sale.status,
@@ -1276,7 +1403,7 @@ export default function App() {
   };
 
   const handleDeleteCustomer = async (customerId: string, customerName: string) => {
-    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN)) return;
     const customerSales = sales.filter(s => s.customer_id === customerId);
     const salesCount = customerSales.length;
     const salesWarning = salesCount > 0 
@@ -1321,7 +1448,7 @@ export default function App() {
   };
 
   const handleRejectDeletion = async (sale: Sale) => {
-    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR && currentUser.role !== UserRole.GERENTE)) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR)) return;
     try {
       const restoredStatus = sale.previous_status || SaleStatus.PENDENTE;
       await updateDoc(doc(db, 'sales', sale.id), {
@@ -1400,6 +1527,19 @@ export default function App() {
 
     try {
       await updateDoc(doc(db, 'receipts', receiptId), { status: newStatus });
+      
+      // When marking receipt as PAGO, also mark the sale as PAGO
+      if (newStatus === ReceiptStatus.PAGO) {
+        const receipt = receipts.find(r => r.id === receiptId);
+        if (receipt) {
+          await updateDoc(doc(db, 'sales', receipt.sale_id), { 
+            status: SaleStatus.PAGO,
+            paid_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          });
+        }
+      }
+      
       await addLog(currentUser, `Alterou status do comprovante ${receiptId} para ${newStatus}`, receiptId);
     } catch (error: any) {
       showToast('Erro ao atualizar status do comprovante: ' + error.message, 'error');
@@ -1426,7 +1566,7 @@ export default function App() {
   };
 
   const handleUpdateUser = async (userId: string, updates: Partial<UserProfile>) => {
-    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN)) return;
 
     try {
       await updateDoc(doc(db, 'profiles', userId), updates);
@@ -1500,16 +1640,21 @@ export default function App() {
   };
 
   const handleDeleteUser = async (userId: string) => {
-    if (window.confirm('Tem certeza que deseja excluir este usuário permanentemente? Esta ação não pode ser desfeita e pode afetar o histórico de vendas.')) {
-      try {
-        await deleteDoc(doc(db, 'profiles', userId));
-        await addLog(currentUser, `Excluiu o usuário ${userId}`, userId);
-        showToast('Usuário excluído com sucesso!', 'success');
-      } catch (error) {
-        console.error('Erro ao excluir usuário:', error);
-        showToast('Erro ao excluir usuário. Verifique suas permissões.', 'error');
+    setConfirmModal({
+      title: '⚠️ Excluir Usuário',
+      message: 'Tem certeza que deseja excluir este usuário permanentemente? Esta ação não pode ser desfeita e pode afetar o histórico de vendas.',
+      confirmText: 'Excluir Permanentemente',
+      onConfirm: async () => {
+        try {
+          await deleteDoc(doc(db, 'profiles', userId));
+          await addLog(currentUser, `Excluiu o usuário ${userId}`, userId);
+          showToast('Usuário excluído com sucesso!', 'success');
+        } catch (error) {
+          console.error('Erro ao excluir usuário:', error);
+          showToast('Erro ao excluir usuário. Verifique suas permissões.', 'error');
+        }
       }
-    }
+    });
   };
 
   const handleResetDatabase = async () => {
@@ -1621,7 +1766,7 @@ export default function App() {
   };
 
   const handlePayVendedor = async (vendedorId: string, amount: number) => {
-    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN)) return;
 
     if (selectedSalesToPay.length === 0) {
       showToast('Selecione pelo menos uma venda para pagar.', 'warning');
@@ -1632,9 +1777,12 @@ export default function App() {
     try {
       let receiptUrl = '';
       if (paymentReceipt) {
-        const fileRef = ref(storage, `payment_receipts/${vendedorId}/${Date.now()}_${paymentReceipt.name}`);
-        await uploadBytes(fileRef, paymentReceipt);
-        receiptUrl = await getDownloadURL(fileRef);
+        receiptUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('Erro ao ler arquivo'));
+          reader.readAsDataURL(paymentReceipt);
+        });
       }
 
       const unpaidSales = sales.filter(s => selectedSalesToPay.includes(s.id));
@@ -1649,7 +1797,7 @@ export default function App() {
       await addDoc(collection(db, 'payments'), {
         vendedor_id: vendedorId,
         amount,
-        status: 'PAGO',
+        status: 'paid',
         admin_id: currentUser.id,
         created_at: new Date().toISOString(),
         receipt_url: receiptUrl,
@@ -1668,14 +1816,14 @@ export default function App() {
     }
   };
 
-  const handleUploadReceipt = async (saleId: string, file: File) => {
+  const handleUploadReceipt = async (saleId: string, file: File, confirmedValue?: number) => {
     try {
       if (!currentUser) throw new Error('Usuário não autenticado');
       const sale = sales.find(s => s.id === saleId);
       if (!sale) throw new Error('Venda não encontrada');
 
-      if (receipts.some(r => r.sale_id === saleId)) {
-        return; // Receipt already exists
+      if (receipts.some(r => r.sale_id === saleId && r.status !== ReceiptStatus.REJEITADO)) {
+        return; // Non-rejected receipt already exists
       }
 
       // Convert file to base64 (stored directly in Firestore, no Storage needed)
@@ -1686,6 +1834,11 @@ export default function App() {
         reader.readAsDataURL(file);
       });
 
+      const finalConfirmedValue = confirmedValue ?? sale.value ?? 0;
+      const paidDate = getLocalISODate();
+      const imageHash = generateImageHash(base64);
+
+      // Save receipt first with ENVIADO status
       const receiptRef = await addDoc(collection(db, 'receipts'), {
         sale_id: saleId,
         vendedor_id: sale.vendedor_id,
@@ -1693,11 +1846,74 @@ export default function App() {
         file_path: base64,
         status: ReceiptStatus.ENVIADO,
         value: sale.value || 0,
+        confirmed_value: finalConfirmedValue,
+        image_hash: imageHash,
+        paid_date: paidDate,
+        audit_status: 'pending',
         created_at: new Date().toISOString()
       });
 
       await addLog(currentUser, `Enviou comprovante para venda ${saleId}`, receiptRef.id);
-      showToast('Comprovante enviado com sucesso!', 'success');
+
+      // Clear receipt_rejected flag if it was set
+      if (sale.receipt_rejected) {
+        await updateDoc(doc(db, 'sales', saleId), { receipt_rejected: false, receipt_rejection_reason: null });
+      }
+      showToast('Comprovante enviado! Auditando...', 'info');
+
+      // Run OCR audit in background (non-blocking)
+      try {
+        const result = await auditReceipt(base64, finalConfirmedValue, paidDate, receipts);
+        
+        const auditStatus = result.status === 'approved' 
+          ? ReceiptStatus.AUDITADO_APROVADO 
+          : result.status === 'duplicate'
+          ? ReceiptStatus.DUPLICADO
+          : ReceiptStatus.AUDITADO_DIVERGENTE;
+
+        await updateDoc(doc(db, 'receipts', receiptRef.id), {
+          status: auditStatus,
+          ocr_value: result.ocrValue,
+          ocr_date: result.ocrDate,
+          ocr_raw_text: result.rawText,
+          audit_status: result.status,
+          audit_details: result.details,
+          image_hash: result.imageHash,
+          audited_at: new Date().toISOString()
+        });
+
+        if (result.status === 'approved') {
+          showToast('✅ Comprovante auditado e aprovado automaticamente!', 'success');
+        } else if (result.status === 'duplicate') {
+          // Mark receipt as duplicate (don't delete - sellers don't have delete permission)
+          await updateDoc(doc(db, 'receipts', receiptRef.id), {
+            status: ReceiptStatus.DUPLICADO,
+            audit_status: 'duplicate',
+            audit_details: 'Comprovante duplicado detectado',
+            audited_at: new Date().toISOString()
+          });
+          await updateDoc(doc(db, 'sales', saleId), {
+            status: SaleStatus.AGUARDANDO,
+            paid_at: null,
+            receipt_rejected: true,
+            receipt_rejection_reason: 'Comprovante Duplicado',
+            updated_at: new Date().toISOString()
+          });
+          await addLog(currentUser, `Comprovante duplicado detectado na venda ${saleId} — venda revertida para Atendimento Iniciado`, saleId);
+          showToast('🚫 Comprovante duplicado! Venda devolvida para enviar novo comprovante.', 'error');
+        } else {
+          showToast(`⚠️ Divergência detectada: ${result.details}`, 'warning');
+        }
+      } catch (auditErr: any) {
+        console.error('Erro na auditoria OCR:', auditErr);
+        // Audit failed but receipt was saved - admin can review manually
+        await updateDoc(doc(db, 'receipts', receiptRef.id), {
+          audit_status: 'error',
+          audit_details: `Erro na auditoria: ${auditErr.message}`,
+          audited_at: new Date().toISOString()
+        });
+        showToast('Comprovante enviado, mas auditoria falhou. Admin pode revisar manualmente.', 'warning');
+      }
     } catch (err: any) {
       console.error('Erro no processo de upload:', err);
       showToast('Erro no upload: ' + err.message, 'error');
@@ -1706,34 +1922,11 @@ export default function App() {
   };
 
   const handleViewReceipt = (filePath: string) => {
-    try {
-      if (filePath.startsWith('http')) {
-        window.open(filePath, '_blank');
-      } else if (filePath.startsWith('data:')) {
-        // Fallback for old base64 receipts
-        const arr = filePath.split(',');
-        const mime = arr[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
-        const bstr = atob(arr[1]);
-        let n = bstr.length;
-        const u8arr = new Uint8Array(n);
-        while (n--) {
-          u8arr[n] = bstr.charCodeAt(n);
-        }
-        const blob = new Blob([u8arr], { type: mime });
-        const url = URL.createObjectURL(blob);
-        window.open(url, '_blank');
-      } else {
-        window.open(filePath, '_blank');
-      }
-    } catch (e) {
-      console.error(e);
-      const win = window.open();
-      if (win) win.document.write(`<img src="${filePath}" style="max-width: 100%;" />`);
-    }
+    setViewingImageUrl(filePath);
   };
 
   const handleCreateUser = async (userData: any) => {
-    if (!currentUser || (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE)) return;
+    if (!currentUser || (currentUser.role !== UserRole.ADMIN)) return;
     setIsSubmitting(true);
 
     try {
@@ -1751,7 +1944,7 @@ export default function App() {
         id: user.uid,
         name: userData.name,
         username: userData.username,
-        role: UserRole.VENDEDOR,
+        role: userData.role || UserRole.VENDEDOR,
         daily_goal: Number(userData.daily_goal),
         commission: Number(userData.commission),
         status: 'ATIVO',
@@ -1868,21 +2061,22 @@ export default function App() {
 
 
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
-    { id: 'new-sale', label: 'Nova Venda', icon: Plus, roles: [UserRole.ADMIN, UserRole.VENDEDOR] },
-    { id: 'sales', label: 'Fluxo de Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'customers', label: 'Clientes', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'contracts', label: 'Contratos', icon: Repeat, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: expiringContractsCount },
-    { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE], badge: remarketingBadgeCount },
-    { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR, UserRole.GERENTE] },
-    { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN, UserRole.GERENTE] },
-    { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN, UserRole.GERENTE] },
-    { id: 'data-hub', label: 'Central de Dados', icon: Database, roles: [UserRole.ADMIN, UserRole.GERENTE] },
-    { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN, UserRole.GERENTE] },
-    { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.GERENTE] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'ranking', label: 'Ranking', icon: Trophy, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'new-lead', label: 'Novo Lead', icon: PlusCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'new-sale', label: 'Nova Venda', icon: Plus, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'sales', label: 'Fluxo de Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'customers', label: 'Clientes', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'contracts', label: 'Contratos', icon: Repeat, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR], badge: expiringContractsCount },
+    { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR], badge: remarketingBadgeCount },
+    { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR], badge: newReceiptsCount },
+    { id: 'my-payments', label: 'Meus Pagamentos', icon: Wallet, roles: [UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
+    { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN] },
+    { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN] },
+    { id: 'data-hub', label: 'Central de Dados', icon: Database, roles: [UserRole.ADMIN] },
+    { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN] },
+    { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR], badge: sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).length },
   ];
 
   return (
@@ -1915,7 +2109,14 @@ export default function App() {
           {menuItems.filter(item => item.roles.includes(currentUser.role)).map((item) => (
             <button
               key={item.id}
-              onClick={() => setCurrentPage(item.id)}
+              onClick={() => {
+                setCurrentPage(item.id);
+                if (item.id === 'receipts') {
+                  const now = new Date().toISOString();
+                  localStorage.setItem('receiptsLastSeen', now);
+                  setReceiptsLastSeen(now);
+                }
+              }}
               className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
                 currentPage === item.id 
                 ? 'bg-indigo-50 text-indigo-600' 
@@ -1979,7 +2180,15 @@ export default function App() {
               {menuItems.filter(item => item.roles.includes(currentUser.role)).map((item) => (
                 <button
                   key={item.id}
-                  onClick={() => { setCurrentPage(item.id); setMobileMenuOpen(false); }}
+                  onClick={() => {
+                    setCurrentPage(item.id);
+                    if (item.id === 'receipts') {
+                      const now = new Date().toISOString();
+                      localStorage.setItem('receiptsLastSeen', now);
+                      setReceiptsLastSeen(now);
+                    }
+                    setMobileMenuOpen(false);
+                  }}
                   className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all ${
                     currentPage === item.id 
                     ? 'bg-indigo-50 text-indigo-600' 
@@ -2090,7 +2299,7 @@ export default function App() {
                       <p className="text-zinc-500 text-sm">Acompanhe o desempenho em tempo real</p>
                     </div>
                     <div className="flex items-center gap-3 flex-wrap">
-                      {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || currentUser.role === UserRole.SUPERVISOR) && (
+                      {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR) && (
                         <div className="bg-white p-2 rounded-2xl shadow-sm border border-black/5">
                           <select
                             value={dashboardVendorFilter}
@@ -2123,7 +2332,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     <StatCard 
                       title="Faturamento no Período" 
                       value={`R$ ${stats.dailyTotal.toLocaleString()}`} 
@@ -2151,24 +2360,6 @@ export default function App() {
                       icon={Target} 
                       color="bg-blue-500"
                       subtitle={`Leads convertidos em vendas pagas`}
-                    />
-                    <StatCard 
-                      title="Ranking Atual" 
-                      value={`#${ranking.findIndex(r => r.id === currentUser.id) + 1 || '-'}`} 
-                      icon={Trophy} 
-                      color="bg-purple-500"
-                      action={
-                        <select 
-                          value={rankingFilter} 
-                          onChange={(e) => setRankingFilter(e.target.value as any)}
-                          className="text-xs bg-zinc-100 border-none rounded-md px-2 py-1 text-zinc-600 font-bold outline-none cursor-pointer"
-                        >
-                          <option value="daily">Diário</option>
-                          <option value="weekly">Semanal</option>
-                          <option value="monthly">Mensal</option>
-                          <option value="all">Geral</option>
-                        </select>
-                      }
                     />
                     <StatCard 
                       title="MRR (Receita Recorrente)" 
@@ -2215,7 +2406,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && adminGoalTracking.length > 0 && (
+                      {adminGoalTracking.length > 0 && (
                         <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5">
                           <div className="flex items-center gap-3 mb-6">
                             <Target className="w-6 h-6 text-indigo-600" />
@@ -2262,27 +2453,30 @@ export default function App() {
                           <table className="w-full text-left">
                             <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
                               <tr>
-                                <th className="px-6 py-4 font-semibold">Cliente</th>
+                                <th className="px-6 py-4 font-semibold">Telefone</th>
+                                <th className="px-6 py-4 font-semibold">Vendedor</th>
                                 <th className="px-6 py-4 font-semibold">Serviço</th>
                                 <th className="px-6 py-4 font-semibold">Valor</th>
                                 <th className="px-6 py-4 font-semibold">Status</th>
                               </tr>
                             </thead>
-                      <tbody className="divide-y divide-black/5">
+                            <tbody className="divide-y divide-black/5">
                               {mySales.slice(0, 5).map((sale) => (
                                 <tr key={sale.id} className="hover:bg-zinc-50 transition-all">
                                   <td className="px-6 py-4">
-                                    <p className="font-bold text-zinc-900">{sale.name || 'Cliente'}</p>
-                                    <p className="text-xs text-zinc-500">{sale.phone}</p>
+                                    <p className="font-bold text-zinc-900">{sale.phone}</p>
                                     <p className="text-[10px] text-zinc-400">Criado em: {new Date(sale.created_at).toLocaleDateString()}</p>
+                                  </td>
+                                  <td className="px-6 py-4">
+                                    <p className="text-sm font-medium text-zinc-700">{users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido'}</p>
                                   </td>
                                   <td className="px-6 py-4 text-sm text-zinc-600">{sale.service}</td>
                                   <td className="px-6 py-4">
-                               <p className="font-bold text-zinc-900">R$ {sale.value.toLocaleString()}</p>
-                               {sale.paid_at && (
-                                 <p className="text-[10px] text-emerald-600 font-medium">Pago: {new Date(sale.paid_at).toLocaleDateString()}</p>
-                               )}
-                             </td>
+                                    <p className="font-bold text-zinc-900">R$ {sale.value.toLocaleString()}</p>
+                                    {sale.paid_at && (
+                                      <p className="text-[10px] text-emerald-600 font-medium">Pago: {new Date(sale.paid_at).toLocaleDateString()}</p>
+                                    )}
+                                  </td>
                                   <td className="px-6 py-4">
                                     <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${
                                       sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
@@ -2451,6 +2645,7 @@ export default function App() {
                           <th className="p-4 font-semibold">Vendedor</th>
                           <th className="p-4 font-semibold">Total Compras</th>
                           <th className="p-4 font-semibold">Valor Total LTV</th>
+                          <th className="p-4 font-semibold">Cadastro</th>
                           <th className="p-4 font-semibold text-right">Ações</th>
                         </tr>
                       </thead>
@@ -2527,6 +2722,9 @@ export default function App() {
                             <td className="p-4 font-black text-emerald-600">
                               R$ {getCustomerLTV(customer.id).total_spent.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                             </td>
+                            <td className="p-4 text-xs text-zinc-500 font-medium">
+                              {new Date(customer.created_at).toLocaleDateString('pt-BR')}
+                            </td>
                             <td className="p-4 text-right flex gap-2 justify-end">
                               <button 
                                 onClick={() => setViewingCustomer(customer)}
@@ -2534,7 +2732,7 @@ export default function App() {
                               >
                                 Ver Ficha
                               </button>
-                              {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+                              {(currentUser.role === UserRole.ADMIN) && (
                                 <button 
                                   onClick={() => handleDeleteCustomer(customer.id, customer.name)}
                                   className="px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors"
@@ -2547,7 +2745,7 @@ export default function App() {
                         ))}
                         {customers.length === 0 && (
                           <tr>
-                            <td colSpan={6} className="p-8 text-center text-zinc-500">
+                            <td colSpan={7} className="p-8 text-center text-zinc-500">
                               Nenhum cliente registrado ainda. Eles aparecerão aqui quando você criar novas vendas.
                             </td>
                           </tr>
@@ -3152,10 +3350,16 @@ export default function App() {
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex flex-col gap-1">
+                                  {(() => {
+                                    const isListPago = sale.status === SaleStatus.PAGO;
+                                    const isReceiptListLocked = currentUser.role === UserRole.VENDEDOR && receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
+                                    const isListLocked = isListPago || isReceiptListLocked;
+                                    return (
+                                    <>
                                   <select 
                                     value={sale.status}
                                     onChange={(e) => handleUpdateStatus(sale.id, e.target.value as SaleStatus)}
-                                    disabled={(sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.GERENTE && currentUser.role !== UserRole.SUPERVISOR) || sale.transfer_to !== undefined && sale.transfer_to !== null}
+                                    disabled={isListLocked || (sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR) || sale.transfer_to !== undefined && sale.transfer_to !== null}
                                     className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase outline-none cursor-pointer w-fit ${
                                       sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
                                       sale.status === SaleStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
@@ -3173,6 +3377,25 @@ export default function App() {
                                       ⚠️ Sem atendimento há {getStaleHours(sale as Sale)}h
                                     </span>
                                   )}
+                                  {/* Receipt Rejected alert in list */}
+                                  {(sale as Sale).receipt_rejected && (
+                                    <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full w-fit animate-pulse">
+                                      ❌ {(sale as Sale).receipt_rejection_reason || 'Comprovante Rejeitado'}
+                                    </span>
+                                  )}
+                                  {/* Locked badge in list */}
+                                  {isListPago && (
+                                    <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full w-fit flex items-center gap-1">
+                                      <Lock className="w-3 h-3" /> Venda finalizada ✅
+                                    </span>
+                                  )}
+                                  {isReceiptListLocked && !isListPago && (
+                                    <span className="text-[10px] font-bold text-zinc-500 bg-zinc-100 px-2 py-0.5 rounded-full w-fit flex items-center gap-1">
+                                      <Lock className="w-3 h-3" /> Aguardando análise
+                                    </span>
+                                  )}
+                                  </>);
+                                  })()}
                                   {/* Remarketing timer in list */}
                                   {(() => {
                                     const rmk = getRemarketingTimeInfo(sale as Sale);
@@ -3259,7 +3482,7 @@ export default function App() {
                                       <button onClick={() => setTransferringSale(sale)} className="p-2 hover:bg-blue-50 text-blue-600 rounded-lg transition-all" title="Transferir Lead">
                                         <ArrowRightLeft className="w-4 h-4" />
                                       </button>
-                                      {sale.status === SaleStatus.EXCLUSAO_SOLICITADA && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || currentUser.role === UserRole.SUPERVISOR) && (
+                                      {sale.status === SaleStatus.EXCLUSAO_SOLICITADA && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR) && (
                                         <>
                                           <button 
                                             onClick={() => handleDeleteSale(sale.id)}
@@ -3305,7 +3528,7 @@ export default function App() {
                             }
                             
                             return true;
-                          });
+                          }).sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 
                           return (
                           <div 
@@ -3324,13 +3547,29 @@ export default function App() {
                               {statusSales.map(sale => {
                                 const stale = isStaleAguardando(sale);
                                 const rmkInfo = getRemarketingTimeInfo(sale);
+                                const isPago = sale.status === SaleStatus.PAGO;
+                                const isReceiptLocked = currentUser.role === UserRole.VENDEDOR && receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
+                                const isLocked = isPago || isReceiptLocked;
                                 return (
                                 <div 
                                   key={sale.id}
-                                  draggable
-                                  onDragStart={(e) => handleDragStart(e, sale.id)}
-                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all cursor-grab active:cursor-grabbing flex flex-col gap-3 ${stale ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isExpired ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isWarning ? 'border-amber-300 ring-1 ring-amber-200' : 'border-black/5'}`}
+                                  draggable={!isLocked}
+                                  onDragStart={(e) => isLocked ? e.preventDefault() : handleDragStart(e, sale.id)}
+                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all flex flex-col gap-3 ${isLocked ? 'opacity-70 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'} ${stale ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isExpired ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isWarning ? 'border-amber-300 ring-1 ring-amber-200' : isPago ? 'border-emerald-300 ring-1 ring-emerald-200' : 'border-black/5'}`}
                                 >
+                                  {/* Lock badge */}
+                                  {isPago && (
+                                    <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg w-fit">
+                                      <Lock className="w-3 h-3" />
+                                      Venda finalizada ✅
+                                    </div>
+                                  )}
+                                  {isReceiptLocked && !isPago && (
+                                    <div className="flex items-center gap-1 text-[10px] font-bold text-zinc-500 bg-zinc-100 px-2 py-1 rounded-lg w-fit">
+                                      <Lock className="w-3 h-3" />
+                                      Aguardando análise do Admin
+                                    </div>
+                                  )}
                                   {/* Stale AGUARDANDO alert */}
                                   {stale && (
                                     <div className="flex items-center justify-between gap-2">
@@ -3344,6 +3583,12 @@ export default function App() {
                                         → Remarketing
                                       </button>
                                     </div>
+                                  )}
+                                  {/* Receipt Rejected alert */}
+                                  {sale.receipt_rejected && (
+                                    <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg animate-pulse w-fit">
+                                      ❌ {sale.receipt_rejection_reason || 'Comprovante Rejeitado'} — envie novamente
+                                    </span>
                                   )}
                                   {/* Remarketing timer */}
                                   {rmkInfo && (
@@ -3383,7 +3628,7 @@ export default function App() {
                                       >
                                         <MessageCircle className="w-3 h-3" />
                                       </a>
-                                      {!(sale.status === SaleStatus.PAGO && currentUser.role === UserRole.VENDEDOR) && (
+                                      {!(sale.status === SaleStatus.PAGO && currentUser.role === UserRole.VENDEDOR) && !isLocked && (
                                         <button 
                                           onClick={() => setEditingSale(sale)}
                                           className="p-1.5 bg-zinc-50 text-zinc-500 rounded-lg hover:bg-zinc-100 transition-colors"
@@ -3407,80 +3652,251 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'receipts' && (
-                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
-                  <div className="p-6 border-b border-black/5">
-                    <h3 className="font-bold text-zinc-900">Gestão de Comprovantes</h3>
+              {currentPage === 'receipts' && (() => {
+                const visibleReceipts = receipts.filter(r => {
+                  // Role-based filter
+                  if (currentUser.role !== UserRole.ADMIN && r.vendedor_id !== currentUser.id) return false;
+                  // Vendor filter
+                  if (receiptVendorFilter && r.vendedor_id !== receiptVendorFilter) return false;
+                  // Date filter
+                  if (receiptDateFrom && r.created_at < receiptDateFrom) return false;
+                  if (receiptDateTo && r.created_at > receiptDateTo + 'T23:59:59') return false;
+                  return true;
+                });
+                const approvedCount = visibleReceipts.filter(r => r.audit_status === 'approved').length;
+                const divergentCount = visibleReceipts.filter(r => r.audit_status === 'divergent').length;
+                const duplicateCount = visibleReceipts.filter(r => r.audit_status === 'duplicate').length;
+                const pendingCount = visibleReceipts.filter(r => !r.audit_status || r.audit_status === 'pending' || r.audit_status === 'error').length;
+                const filteredReceipts = receiptAuditFilter === 'all' 
+                  ? visibleReceipts 
+                  : receiptAuditFilter === 'pending'
+                  ? visibleReceipts.filter(r => !r.audit_status || r.audit_status === 'pending' || r.audit_status === 'error')
+                  : visibleReceipts.filter(r => r.audit_status === receiptAuditFilter);
+
+                return (
+                <div className="space-y-6">
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="bg-white rounded-2xl p-4 border border-black/5 shadow-sm">
+                      <p className="text-xs font-bold text-zinc-400 uppercase">Total</p>
+                      <p className="text-2xl font-black text-zinc-900">{visibleReceipts.length}</p>
+                    </div>
+                    <div className="bg-emerald-50 rounded-2xl p-4 border border-emerald-100">
+                      <p className="text-xs font-bold text-emerald-500 uppercase">✅ Aprovados</p>
+                      <p className="text-2xl font-black text-emerald-600">{approvedCount}</p>
+                    </div>
+                    <div className="bg-amber-50 rounded-2xl p-4 border border-amber-100">
+                      <p className="text-xs font-bold text-amber-500 uppercase">⚠️ Divergentes</p>
+                      <p className="text-2xl font-black text-amber-600">{divergentCount}</p>
+                    </div>
+                    <div className="bg-red-50 rounded-2xl p-4 border border-red-100">
+                      <p className="text-xs font-bold text-red-400 uppercase">🚫 Duplicados</p>
+                      <p className="text-2xl font-black text-red-500">{duplicateCount}</p>
+                    </div>
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left">
-                      <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
-                        <tr>
-                          <th className="px-6 py-4 font-semibold">Data Envio</th>
-                          <th className="px-6 py-4 font-semibold">Vendedor</th>
-                          <th className="px-6 py-4 font-semibold">Arquivo</th>
-                          <th className="px-6 py-4 font-semibold">Valor</th>
-                          <th className="px-6 py-4 font-semibold">Status</th>
-                          {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && <th className="px-6 py-4 font-semibold">Ações</th>}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-black/5">
-                        {receipts.filter(r => currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE || r.vendedor_id === currentUser.id).map((receipt) => (
-                          <tr key={receipt.id} className="hover:bg-zinc-50 transition-all">
-                            <td className="px-6 py-4 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleDateString()}</td>
-                            <td className="px-6 py-4 text-sm font-medium text-zinc-900">{users.find(u => u.id === receipt.vendedor_id)?.name}</td>
-                            <td className="px-6 py-4 text-sm text-indigo-600 font-medium">
-                              <button 
-                                onClick={() => handleViewReceipt(receipt.file_path)} 
-                                className="hover:underline flex items-center gap-1 text-indigo-600 font-medium"
-                              >
-                                {receipt.file_name}
-                                <ChevronRight className="w-3 h-3" />
-                              </button>
-                            </td>
-                            <td className="px-6 py-4 font-bold text-zinc-900">R$ {receipt.value.toLocaleString()}</td>
-                            <td className="px-6 py-4">
-                              {currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE ? (
-                                <select 
-                                  value={receipt.status}
-                                  onChange={(e) => handleUpdateReceiptStatus(receipt.id, e.target.value as ReceiptStatus)}
-                                  className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase outline-none cursor-pointer ${
-                                    receipt.status === ReceiptStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
-                                    receipt.status === ReceiptStatus.CONFERIDO ? 'bg-indigo-100 text-indigo-600' :
-                                    'bg-amber-100 text-amber-600'
-                                  }`}
-                                >
-                                  {Object.values(ReceiptStatus).map(s => <option key={s} value={s}>{s}</option>)}
-                                </select>
-                              ) : (
-                                <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${
-                                  receipt.status === ReceiptStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
-                                  receipt.status === ReceiptStatus.CONFERIDO ? 'bg-indigo-100 text-indigo-600' :
-                                  'bg-amber-100 text-amber-600'
-                                }`}>
-                                  {receipt.status}
-                                </span>
-                              )}
-                            </td>
-                            {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
-                              <td className="px-6 py-4">
+
+                  {/* Filters + Table */}
+                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                    <div className="p-6 border-b border-black/5 flex flex-col gap-4">
+                      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <h3 className="font-bold text-zinc-900 text-lg">Gestão de Comprovantes</h3>
+                        <div className="flex gap-3 items-center flex-wrap">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="date"
+                              value={receiptDateFrom}
+                              onChange={(e) => setReceiptDateFrom(e.target.value)}
+                              className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"
+                              title="Data início"
+                            />
+                            <span className="text-zinc-400 text-xs">até</span>
+                            <input
+                              type="date"
+                              value={receiptDateTo}
+                              onChange={(e) => setReceiptDateTo(e.target.value)}
+                              className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"
+                              title="Data fim"
+                            />
+                            {(receiptDateFrom || receiptDateTo) && (
+                              <button onClick={() => { setReceiptDateFrom(''); setReceiptDateTo(''); }} className="text-xs text-red-500 hover:text-red-700 font-bold">✕</button>
+                            )}
+                          </div>
+                          {(currentUser.role === UserRole.ADMIN) && (
+                            <select
+                              value={receiptVendorFilter}
+                              onChange={(e) => setReceiptVendorFilter(e.target.value)}
+                              className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none min-w-[140px]"
+                            >
+                              <option value="">Todos os vendedores</option>
+                              {users.filter(u => u.status === 'ATIVO').map(u => (
+                                <option key={u.id} value={u.id}>{u.name}</option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex gap-2 flex-wrap">
+                        {[
+                          { key: 'all' as const, label: 'Todos', count: visibleReceipts.length },
+                          { key: 'approved' as const, label: '✅ Aprovados', count: approvedCount },
+                          { key: 'divergent' as const, label: '⚠️ Divergentes', count: divergentCount },
+                          { key: 'duplicate' as const, label: '🚫 Duplicados', count: duplicateCount },
+                          { key: 'pending' as const, label: '⏳ Pendentes', count: pendingCount },
+                        ].map(f => (
+                          <button
+                            key={f.key}
+                            onClick={() => setReceiptAuditFilter(f.key)}
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all ${
+                              receiptAuditFilter === f.key
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100'
+                                : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                            }`}
+                          >
+                            {f.label} ({f.count})
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                          <tr>
+                            <th className="px-4 py-3 font-semibold">Data</th>
+                            <th className="px-4 py-3 font-semibold">Vendedor</th>
+                            <th className="px-4 py-3 font-semibold">Arquivo</th>
+                            <th className="px-4 py-3 font-semibold">Valor Confirmado</th>
+                            <th className="px-4 py-3 font-semibold">Valor OCR</th>
+                            <th className="px-4 py-3 font-semibold">Auditoria</th>
+                            <th className="px-4 py-3 font-semibold">Detalhes</th>
+                            {(currentUser.role === UserRole.ADMIN) && <th className="px-4 py-3 font-semibold">Ações</th>}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-black/5">
+                          {filteredReceipts.length === 0 ? (
+                            <tr>
+                              <td colSpan={8} className="px-4 py-12 text-center text-zinc-400">
+                                Nenhum comprovante encontrado para este filtro
+                              </td>
+                            </tr>
+                          ) : filteredReceipts.map((receipt) => (
+                            <tr key={receipt.id} className={`hover:bg-zinc-50 transition-all ${
+                              receipt.audit_status === 'divergent' ? 'bg-amber-50/50' :
+                              receipt.audit_status === 'duplicate' ? 'bg-red-50/50' : ''
+                            }`}>
+                              <td className="px-4 py-3 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleDateString()}</td>
+                              <td className="px-4 py-3 text-sm font-medium text-zinc-900">{users.find(u => u.id === receipt.vendedor_id)?.name}</td>
+                              <td className="px-4 py-3 text-sm">
                                 <button 
-                                  onClick={() => handleViewReceipt(receipt.file_path)}
-                                  className="text-xs font-bold text-indigo-600 hover:underline"
+                                  onClick={() => handleViewReceipt(receipt.file_path)} 
+                                  className="hover:underline flex items-center gap-1 text-indigo-600 font-medium"
                                 >
-                                  Ver Arquivo
+                                  {receipt.file_name}
+                                  <ChevronRight className="w-3 h-3" />
                                 </button>
                               </td>
-                            )}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                              <td className="px-4 py-3 font-bold text-zinc-900">
+                                R$ {(receipt.confirmed_value ?? receipt.value)?.toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+                              </td>
+                              <td className="px-4 py-3 font-bold">
+                                {receipt.ocr_value !== undefined && receipt.ocr_value !== null ? (
+                                  <span className={receipt.ocr_value === (receipt.confirmed_value ?? receipt.value) ? 'text-emerald-600' : 'text-red-500'}>
+                                    R$ {receipt.ocr_value.toLocaleString('pt-BR', {minimumFractionDigits: 2})}
+                                  </span>
+                                ) : (
+                                  <span className="text-zinc-300">—</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${
+                                  receipt.audit_status === 'approved' ? 'bg-emerald-100 text-emerald-600' :
+                                  receipt.audit_status === 'divergent' ? 'bg-amber-100 text-amber-600' :
+                                  receipt.audit_status === 'duplicate' ? 'bg-red-100 text-red-600' :
+                                  receipt.audit_status === 'error' ? 'bg-rose-100 text-rose-600' :
+                                  receipt.status === ReceiptStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
+                                  'bg-zinc-100 text-zinc-500'
+                                }`}>
+                                  {receipt.audit_status === 'approved' ? '✅ Aprovado' :
+                                   receipt.audit_status === 'divergent' ? '⚠️ Divergente' :
+                                   receipt.audit_status === 'duplicate' ? '🚫 Duplicado' :
+                                   receipt.audit_status === 'error' ? '❌ Erro OCR' :
+                                   receipt.status === ReceiptStatus.PAGO ? '💰 Pago' :
+                                   '⏳ Pendente'}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-xs text-zinc-500 max-w-[200px] truncate" title={receipt.audit_details || ''}>
+                                {receipt.audit_details || '—'}
+                              </td>
+                              {(currentUser.role === UserRole.ADMIN) && (
+                                <td className="px-4 py-3">
+                                  <div className="flex gap-2">
+                                    <button 
+                                      onClick={() => handleViewReceipt(receipt.file_path)}
+                                      className="text-xs font-bold text-indigo-600 hover:underline"
+                                    >
+                                      Ver
+                                    </button>
+                                    {(receipt.audit_status === 'divergent' || receipt.audit_status === 'error' || !receipt.audit_status || receipt.audit_status === 'pending') && (
+                                      <button 
+                                        onClick={async () => {
+                                          await updateDoc(doc(db, 'receipts', receipt.id), { 
+                                            status: ReceiptStatus.PAGO, 
+                                            audit_status: 'approved',
+                                            audit_details: 'Aprovado manualmente pelo admin',
+                                            audited_at: new Date().toISOString()
+                                          });
+                                          await handleUpdateStatus(receipt.sale_id, SaleStatus.PAGO, true);
+                                          await addLog(currentUser, `Aprovou manualmente comprovante ${receipt.id}`, receipt.id);
+                                          showToast('Comprovante aprovado manualmente!', 'success');
+                                        }}
+                                        className="text-xs font-bold text-emerald-600 hover:underline"
+                                      >
+                                        ✅ Aprovar
+                                      </button>
+                                    )}
+                                    {(receipt.audit_status === 'divergent' || receipt.audit_status === 'duplicate' || receipt.audit_status === 'error' || !receipt.audit_status || receipt.audit_status === 'pending') && (
+                                      <button 
+                                        onClick={() => {
+                                          setConfirmModal({
+                                            title: '❌ Rejeitar Comprovante',
+                                            message: 'Rejeitar este comprovante? A venda voltará para "Atendimento Iniciado" e o vendedor precisará enviar um novo.',
+                                            confirmText: 'Rejeitar',
+                                            onConfirm: async () => {
+                                              try {
+                                                await deleteDoc(doc(db, 'receipts', receipt.id));
+                                                await updateDoc(doc(db, 'sales', receipt.sale_id), {
+                                                  status: SaleStatus.AGUARDANDO,
+                                                  paid_at: null,
+                                                  receipt_rejected: true,
+                                                  receipt_rejection_reason: 'Rejeitado pelo Admin',
+                                                  updated_at: new Date().toISOString()
+                                                });
+                                                await addLog(currentUser, `Rejeitou comprovante ${receipt.id} — venda ${receipt.sale_id} voltou para Atendimento Iniciado`, receipt.id);
+                                                showToast('Comprovante rejeitado. Venda devolvida ao vendedor.', 'success');
+                                              } catch (err: any) {
+                                                showToast('Erro ao rejeitar: ' + err.message, 'error');
+                                              }
+                                            }
+                                          });
+                                        }}
+                                        className="text-xs font-bold text-red-600 hover:underline"
+                                      >
+                                        ❌ Rejeitar
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
-              {currentPage === 'users' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+              {currentPage === 'users' && (currentUser.role === UserRole.ADMIN) && (
                 <div className="space-y-6">
                   <div className="flex justify-between items-center">
                     <h3 className="text-2xl font-bold text-zinc-900">Gestão de Equipe</h3>
@@ -3611,7 +4027,7 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'data-hub' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+              {currentPage === 'data-hub' && (currentUser.role === UserRole.ADMIN) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                   <div className="p-6 border-b border-black/5">
                     <h3 className="font-bold text-zinc-900">Central de Dados</h3>
@@ -3725,49 +4141,61 @@ export default function App() {
                       </div>
                       <div className="flex gap-3 flex-wrap">
                         <button 
-                          onClick={async () => {
+                          onClick={() => {
                             const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
                             const oldReceipts = receipts.filter(r => r.created_at < cutoff);
                             if (oldReceipts.length === 0) {
-                              const now = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now }); setLastCleanupDate(now);
+                              const now = new Date().toISOString(); setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now }); setLastCleanupDate(now);
                               showToast('Nenhum comprovante com mais de 15 dias encontrado.', 'info');
                               return;
                             }
-                            if (!window.confirm(`Deseja apagar ${oldReceipts.length} comprovante(s) com mais de 15 dias? Esta ação não pode ser desfeita.`)) return;
-                            try {
-                              for (const r of oldReceipts) {
-                                await deleteDoc(doc(db, 'receipts', r.id));
+                            setConfirmModal({
+                              title: '🧹 Limpar Comprovantes',
+                              message: `Deseja apagar ${oldReceipts.length} comprovante(s) com mais de 15 dias? Esta ação não pode ser desfeita.`,
+                              confirmText: 'Apagar',
+                              onConfirm: async () => {
+                                try {
+                                  for (const r of oldReceipts) {
+                                    await deleteDoc(doc(db, 'receipts', r.id));
+                                  }
+                                  await addLog(currentUser, `Limpou ${oldReceipts.length} comprovantes antigos (>15 dias)`);
+                                  const nowCleanup = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: nowCleanup }); setLastCleanupDate(nowCleanup);
+                                  showToast(`${oldReceipts.length} comprovante(s) removido(s)!`, 'success');
+                                } catch (err: any) {
+                                  showToast('Erro na limpeza: ' + err.message, 'error');
+                                }
                               }
-                              await addLog(currentUser, `Limpou ${oldReceipts.length} comprovantes antigos (>15 dias)`);
-                              const nowCleanup = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: nowCleanup }); setLastCleanupDate(nowCleanup);
-                              showToast(`${oldReceipts.length} comprovante(s) removido(s)!`, 'success');
-                            } catch (err: any) {
-                              showToast('Erro na limpeza: ' + err.message, 'error');
-                            }
+                            });
                           }}
                           className="bg-red-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-red-700 transition-colors"
                         >
                           Limpar Comprovantes (+15 dias)
                         </button>
                         <button 
-                          onClick={async () => {
+                          onClick={() => {
                             const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
                             const oldLogs = logs.filter(l => l.created_at < cutoff);
                             if (oldLogs.length === 0) {
-                              const now2 = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now2 }); setLastCleanupDate(now2);
+                              const now2 = new Date().toISOString(); setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now2 }); setLastCleanupDate(now2);
                               showToast('Nenhum log com mais de 15 dias encontrado.', 'info');
                               return;
                             }
-                            if (!window.confirm(`Deseja apagar ${oldLogs.length} log(s) com mais de 15 dias? Esta ação não pode ser desfeita.`)) return;
-                            try {
-                              for (const l of oldLogs) {
-                                await deleteDoc(doc(db, 'audit_logs', l.id));
+                            setConfirmModal({
+                              title: '🧹 Limpar Logs',
+                              message: `Deseja apagar ${oldLogs.length} log(s) com mais de 15 dias? Esta ação não pode ser desfeita.`,
+                              confirmText: 'Apagar',
+                              onConfirm: async () => {
+                                try {
+                                  for (const l of oldLogs) {
+                                    await deleteDoc(doc(db, 'audit_logs', l.id));
+                                  }
+                                  const now3 = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now3 }); setLastCleanupDate(now3);
+                                  showToast(`${oldLogs.length} log(s) removido(s)!`, 'success');
+                                } catch (err: any) {
+                                  showToast('Erro na limpeza: ' + err.message, 'error');
+                                }
                               }
-                              const now3 = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now3 }); setLastCleanupDate(now3);
-                              showToast(`${oldLogs.length} log(s) removido(s)!`, 'success');
-                            } catch (err: any) {
-                              showToast('Erro na limpeza: ' + err.message, 'error');
-                            }
+                            });
                           }}
                           className="bg-orange-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-orange-700 transition-colors"
                         >
@@ -3779,7 +4207,7 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'logs' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+              {currentPage === 'logs' && (currentUser.role === UserRole.ADMIN) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                   <div className="p-6 border-b border-black/5 flex justify-between items-center">
                     <h3 className="font-bold text-zinc-900">Logs de Auditoria</h3>
@@ -3819,7 +4247,7 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'financial' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GERENTE) && (
+              {currentPage === 'financial' && (currentUser.role === UserRole.ADMIN) && (
                 <div className="space-y-8">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="flex items-center gap-2 bg-white p-1 rounded-xl shadow-sm border border-black/5">
@@ -3949,44 +4377,156 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'calendar' && (
-                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
-                  <h3 className="text-2xl font-bold text-zinc-900 mb-6">Agenda de Remarketing</h3>
-                  <div className="space-y-4">
-                    {sales.filter(s => s.status === SaleStatus.REMARKETING && s.return_date).sort((a, b) => new Date(a.return_date!).getTime() - new Date(b.return_date!).getTime()).length === 0 ? (
+              {currentPage === 'calendar' && (() => {
+                const today = getLocalISODate();
+                const agendaSales = sales
+                  .filter(s => s.status === SaleStatus.REMARKETING && s.return_date && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || s.vendedor_id === currentUser.id))
+                  .sort((a, b) => new Date(a.return_date!).getTime() - new Date(b.return_date!).getTime());
+
+                const overdue = agendaSales.filter(s => toLocalDateString(s.return_date!) < today);
+                const todayItems = agendaSales.filter(s => toLocalDateString(s.return_date!) === today);
+                const upcoming = agendaSales.filter(s => toLocalDateString(s.return_date!) > today);
+
+                const renderCard = (sale: typeof agendaSales[0]) => {
+                  const returnLocal = toLocalDateString(sale.return_date!);
+                  const returnDate = new Date(sale.return_date! + 'T00:00:00');
+                  const todayDate = new Date(today + 'T00:00:00');
+                  const diffDays = Math.round((returnDate.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
+                  const isOverdue = returnLocal < today;
+                  const isToday = returnLocal === today;
+                  const seller = users.find(u => u.id === sale.vendedor_id);
+                  const rmkInfo = getRemarketingTimeInfo(sale);
+
+                  return (
+                    <div key={sale.id} className={`p-4 rounded-2xl border-2 transition-all hover:shadow-md ${isOverdue ? 'border-red-300 bg-red-50/50' : isToday ? 'border-amber-300 bg-amber-50/30' : 'border-black/5 bg-white'}`}>
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1 space-y-2">
+                          {/* Phone + Value */}
+                          <div className="flex items-center gap-3">
+                            <span className="font-bold text-zinc-900 text-lg">{sale.phone}</span>
+                            <span className="font-black text-emerald-600 text-sm">R$ {sale.value.toLocaleString()}</span>
+                          </div>
+
+                          {/* Service + Vendor */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-medium text-zinc-500 bg-zinc-100 px-2 py-0.5 rounded-full">{sale.service}</span>
+                            {currentUser.role !== UserRole.VENDEDOR && seller && (
+                              <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{seller.name}</span>
+                            )}
+                          </div>
+
+                          {/* Timer badge */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {isOverdue ? (
+                              <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-lg animate-pulse flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                Atrasado há {Math.abs(diffDays)} dia{Math.abs(diffDays) !== 1 ? 's' : ''}
+                              </span>
+                            ) : isToday ? (
+                              <span className="text-xs font-bold text-amber-600 bg-amber-100 px-2 py-1 rounded-lg animate-pulse flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                Retorno HOJE
+                              </span>
+                            ) : (
+                              <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                Em {diffDays} dia{diffDays !== 1 ? 's' : ''} ({new Date(sale.return_date! + 'T00:00:00').toLocaleDateString('pt-BR')})
+                              </span>
+                            )}
+                            {rmkInfo && (
+                              <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${rmkInfo.isExpired ? 'text-red-600 bg-red-100' : rmkInfo.isWarning ? 'text-amber-600 bg-amber-100' : 'text-zinc-500 bg-zinc-100'}`}>
+                                ⏱️ {rmkInfo.label}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Notes */}
+                          {sale.notes && (
+                            <div className="text-xs text-zinc-500 bg-zinc-50 p-2 rounded-lg border border-zinc-100 mt-1">
+                              📝 {sale.notes}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex flex-col gap-2 shrink-0">
+                          <a 
+                            href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="p-2.5 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
+                            title="Chamar no WhatsApp"
+                          >
+                            <MessageCircle className="w-5 h-5" />
+                          </a>
+                          <button 
+                            onClick={() => setEditingSale(sale)}
+                            className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
+                            title="Editar"
+                          >
+                            <Edit2 className="w-5 h-5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                };
+
+                return (
+                <div className="space-y-6">
+                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
+                    <div className="flex justify-between items-center mb-6">
+                      <h3 className="text-2xl font-bold text-zinc-900">Agenda de Remarketing</h3>
+                      <div className="flex gap-2">
+                        {overdue.length > 0 && (
+                          <span className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-xs font-bold">{overdue.length} atrasado{overdue.length !== 1 ? 's' : ''}</span>
+                        )}
+                        {todayItems.length > 0 && (
+                          <span className="px-3 py-1 bg-amber-100 text-amber-600 rounded-full text-xs font-bold">{todayItems.length} pra hoje</span>
+                        )}
+                        {upcoming.length > 0 && (
+                          <span className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-xs font-bold">{upcoming.length} agendado{upcoming.length !== 1 ? 's' : ''}</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {agendaSales.length === 0 ? (
                       <p className="text-zinc-500 text-center py-8">Nenhum lead agendado para remarketing.</p>
                     ) : (
-                      sales.filter(s => s.status === SaleStatus.REMARKETING && s.return_date).sort((a, b) => new Date(a.return_date!).getTime() - new Date(b.return_date!).getTime()).map(sale => (
-                        <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
-                          <div className="flex flex-col gap-1">
-                            <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
-                            <span className="text-sm text-zinc-500">{sale.service} - {new Date(sale.return_date! + 'T00:00:00').toLocaleDateString('pt-BR')}</span>
+                      <div className="space-y-6">
+                        {/* Overdue */}
+                        {overdue.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-bold text-red-600 uppercase tracking-wider mb-3 flex items-center gap-2">
+                              🔴 Atrasados
+                            </h4>
+                            <div className="space-y-3">{overdue.map(renderCard)}</div>
                           </div>
-                          <div className="flex gap-2">
-                            <a 
-                              href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="p-2 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
-                              title="Chamar no WhatsApp"
-                            >
-                              <MessageCircle className="w-5 h-5" />
-                            </a>
-                            <button 
-                              onClick={() => {
-                                setEditingSale(sale);
-                              }}
-                              className="p-2 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
-                            >
-                              <Edit2 className="w-5 h-5" />
-                            </button>
+                        )}
+                        {/* Today */}
+                        {todayItems.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-bold text-amber-600 uppercase tracking-wider mb-3 flex items-center gap-2">
+                              🟡 Retorno Hoje
+                            </h4>
+                            <div className="space-y-3">{todayItems.map(renderCard)}</div>
                           </div>
-                        </div>
-                      ))
+                        )}
+                        {/* Upcoming */}
+                        {upcoming.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-wider mb-3 flex items-center gap-2">
+                              🟢 Próximos
+                            </h4>
+                            <div className="space-y-3">{upcoming.map(renderCard)}</div>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {currentPage === 'ranking' && (
                 <div className="max-w-4xl mx-auto space-y-8">
@@ -4119,68 +4659,141 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {currentPage === 'trash' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || currentUser.role === UserRole.GERENTE) && (
+              {currentPage === 'trash' && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
                   <h3 className="text-2xl font-bold text-zinc-900 mb-6">Aprovações de Exclusão</h3>
                   <div className="space-y-4">
                     {sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).length === 0 ? (
                       <p className="text-zinc-500 text-center py-8">Nenhuma solicitação de exclusão pendente.</p>
                     ) : (
-                      sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).map(sale => (
-                        <div key={sale.id} className="flex items-center justify-between p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
-                          <div className="flex flex-col gap-1">
-                            <span className="font-bold text-zinc-900">📞 {sale.phone}</span>
-                            <span className="text-sm text-zinc-500">{sale.service} - Solicitado por {users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido'} em {new Date(sale.updated_at).toLocaleDateString('pt-BR')}</span>
+                      sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).map(sale => {
+                        const otherActiveSales = sales.filter(s => 
+                          s.customer_id === sale.customer_id && 
+                          s.id !== sale.id && 
+                          s.status !== SaleStatus.DELETED && 
+                          s.status !== SaleStatus.EXCLUSAO_SOLICITADA
+                        );
+                        const customer = customers.find(c => c.id === sale.customer_id);
+                        return (
+                        <div key={sale.id} className="p-4 border border-black/5 rounded-2xl hover:bg-zinc-50 transition-colors">
+                          <div className="flex items-center justify-between">
+                            <div className="flex flex-col gap-1">
+                              <span className="font-bold text-zinc-900">📞 {sale.phone} {customer ? `— ${customer.name}` : ''}</span>
+                              <span className="text-sm text-zinc-500">{sale.service} — R$ {sale.value.toLocaleString()} — Solicitado por {users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido'} em {new Date(sale.updated_at).toLocaleDateString('pt-BR')}</span>
+                              {otherActiveSales.length > 0 && (
+                                <span className="text-xs font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-full w-fit">
+                                  ⚠️ Cliente possui {otherActiveSales.length} outra(s) venda(s) ativa(s) — apenas esta venda será excluída
+                                </span>
+                              )}
+                              {otherActiveSales.length === 0 && (
+                                <span className="text-xs font-bold text-red-500 bg-red-50 px-2 py-1 rounded-full w-fit">
+                                  🗑️ Cliente será excluído junto (sem outras vendas)
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex gap-2">
+                              <button 
+                                onClick={() => {
+                                  const willDeleteCustomer = otherActiveSales.length === 0;
+                                  const msg = willDeleteCustomer 
+                                    ? 'Aprovar exclusão? A venda, o cliente e os comprovantes serão excluídos permanentemente.'
+                                    : 'Aprovar exclusão? Apenas esta venda será excluída. O cliente permanecerá pois tem outras vendas.';
+                                  setConfirmModal({
+                                    title: '🗑️ Aprovar Exclusão',
+                                    message: msg,
+                                    confirmText: 'Aprovar Exclusão',
+                                    onConfirm: async () => {
+                                      try {
+                                        const saleReceipts = receipts.filter(r => r.sale_id === sale.id);
+                                        for (const r of saleReceipts) {
+                                          await deleteDoc(doc(db, 'receipts', r.id));
+                                        }
+                                        await deleteDoc(doc(db, 'sales', sale.id));
+                                        if (willDeleteCustomer && sale.customer_id) {
+                                          await deleteDoc(doc(db, 'customers', sale.customer_id));
+                                          await addLog(currentUser, `Aprovou exclusão: venda ${sale.id} + cliente ${sale.customer_id} removidos permanentemente`, sale.id);
+                                        } else {
+                                          await addLog(currentUser, `Aprovou exclusão: venda ${sale.id} removida permanentemente (cliente mantido, tem outras vendas)`, sale.id);
+                                        }
+                                        showToast('Exclusão aprovada e dados removidos!', 'success');
+                                      } catch (error: any) {
+                                        console.error(error);
+                                        showToast('Erro ao aprovar exclusão: ' + error.message, 'error');
+                                      }
+                                    }
+                                  });
+                                }}
+                                className="px-4 py-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors font-medium text-sm"
+                              >
+                                Aprovar Exclusão
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  setConfirmModal({
+                                    title: '↩️ Rejeitar Exclusão',
+                                    message: 'Deseja rejeitar a exclusão e restaurar esta venda?',
+                                    confirmText: 'Restaurar Venda',
+                                    onConfirm: async () => {
+                                      try {
+                                        await updateDoc(doc(db, 'sales', sale.id), {
+                                          status: sale.previous_status || SaleStatus.AGUARDANDO,
+                                          updated_at: new Date().toISOString()
+                                        });
+                                        await addLog(currentUser, `Rejeitou exclusão da venda ${sale.id}`, sale.id);
+                                        showToast('Venda restaurada com sucesso!', 'success');
+                                      } catch (error) {
+                                        console.error(error);
+                                        showToast('Erro ao restaurar venda.', 'error');
+                                      }
+                                    }
+                                  });
+                                }}
+                                className="px-4 py-2 bg-zinc-100 text-zinc-600 rounded-xl hover:bg-zinc-200 transition-colors font-medium text-sm"
+                              >
+                                Rejeitar
+                              </button>
                           </div>
-                          <div className="flex gap-2">
-                            <button 
-                              onClick={async () => {
-                                if (window.confirm('Deseja aprovar a exclusão desta venda?')) {
-                                  try {
-                                    await updateDoc(doc(db, 'sales', sale.id), {
-                                      status: SaleStatus.DELETED,
-                                      deleted_at: new Date().toISOString(),
-                                      updated_at: new Date().toISOString()
-                                    });
-                                    await addLog(currentUser, `Aprovou exclusão da venda ${sale.id}`, sale.id);
-                                    showToast('Exclusão aprovada com sucesso!', 'success');
-                                  } catch (error) {
-                                    console.error(error);
-                                    showToast('Erro ao aprovar exclusão.', 'error');
-                                  }
-                                }
-                              }}
-                              className="px-4 py-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors font-medium text-sm"
-                            >
-                              Aprovar Exclusão
-                            </button>
-                            <button 
-                              onClick={async () => {
-                                if (window.confirm('Deseja rejeitar a exclusão e restaurar esta venda?')) {
-                                  try {
-                                    await updateDoc(doc(db, 'sales', sale.id), {
-                                      status: sale.previous_status || SaleStatus.AGUARDANDO,
-                                      updated_at: new Date().toISOString()
-                                    });
-                                    await addLog(currentUser, `Rejeitou exclusão da venda ${sale.id}`, sale.id);
-                                    showToast('Venda restaurada com sucesso!', 'success');
-                                  } catch (error) {
-                                    console.error(error);
-                                    showToast('Erro ao restaurar venda.', 'error');
-                                  }
-                                }
-                              }}
-                              className="px-4 py-2 bg-zinc-100 text-zinc-600 rounded-xl hover:bg-zinc-200 transition-colors font-medium text-sm"
-                            >
-                              Rejeitar
-                            </button>
                           </div>
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
 
-                  <h3 className="text-2xl font-bold text-zinc-900 mt-8 mb-6 pt-6 border-t border-black/5">Lixeira (Excluídos)</h3>
+                  <div className="flex justify-between items-center mt-8 mb-6 pt-6 border-t border-black/5">
+                    <h3 className="text-2xl font-bold text-zinc-900">Lixeira (Excluídos)</h3>
+                    {sales.filter(s => s.status === SaleStatus.DELETED).length > 0 && (
+                      <button
+                        onClick={() => {
+                          const deletedSales = sales.filter(s => s.status === SaleStatus.DELETED);
+                          setConfirmModal({
+                            title: '🗑️ Limpar Lixeira',
+                            message: `Excluir PERMANENTEMENTE ${deletedSales.length} venda(s) da lixeira? Esta ação não pode ser desfeita.`,
+                            confirmText: 'Excluir Permanentemente',
+                            onConfirm: async () => {
+                              try {
+                                for (const sale of deletedSales) {
+                                  const saleReceipts = receipts.filter(r => r.sale_id === sale.id);
+                                  for (const receipt of saleReceipts) {
+                                    await deleteDoc(doc(db, 'receipts', receipt.id));
+                                  }
+                                  await deleteDoc(doc(db, 'sales', sale.id));
+                                }
+                                await addLog(currentUser, `Limpou a lixeira (${deletedSales.length} venda(s) excluídas permanentemente)`);
+                                showToast(`${deletedSales.length} venda(s) excluída(s) permanentemente!`, 'success');
+                              } catch (err: any) {
+                                showToast('Erro ao limpar lixeira: ' + err.message, 'error');
+                              }
+                            }
+                          });
+                        }}
+                        className="bg-red-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-red-700 transition-colors text-sm flex items-center gap-2"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        Limpar Lixeira
+                      </button>
+                    )}
+                  </div>
                   <div className="space-y-4">
                     {sales.filter(s => s.status === SaleStatus.DELETED).length === 0 ? (
                       <p className="text-zinc-500 text-center py-8">Nenhuma venda na lixeira.</p>
@@ -4192,22 +4805,27 @@ export default function App() {
                             <span className="text-sm text-zinc-500">{sale.service} - R$ {sale.value.toLocaleString()} — Excluído em {sale.deleted_at ? new Date(sale.deleted_at).toLocaleDateString('pt-BR') : '-'}</span>
                           </div>
                           <button 
-                            onClick={async () => {
-                              if (window.confirm('Deseja restaurar esta venda da lixeira?')) {
-                                try {
-                                  await updateDoc(doc(db, 'sales', sale.id), {
-                                    status: sale.previous_status || SaleStatus.AGUARDANDO,
-                                    deleted_at: null,
-                                    deleted_by: null,
-                                    updated_at: new Date().toISOString()
-                                  });
-                                  await addLog(currentUser, `Restaurou venda ${sale.id} da lixeira`, sale.id);
-                                  showToast('Venda restaurada com sucesso!', 'success');
-                                } catch (error) {
-                                  console.error(error);
-                                  showToast('Erro ao restaurar venda.', 'error');
+                            onClick={() => {
+                              setConfirmModal({
+                                title: '↩️ Restaurar Venda',
+                                message: 'Deseja restaurar esta venda da lixeira?',
+                                confirmText: 'Restaurar',
+                                onConfirm: async () => {
+                                  try {
+                                    await updateDoc(doc(db, 'sales', sale.id), {
+                                      status: sale.previous_status || SaleStatus.AGUARDANDO,
+                                      deleted_at: null,
+                                      deleted_by: null,
+                                      updated_at: new Date().toISOString()
+                                    });
+                                    await addLog(currentUser, `Restaurou venda ${sale.id} da lixeira`, sale.id);
+                                    showToast('Venda restaurada com sucesso!', 'success');
+                                  } catch (error) {
+                                    console.error(error);
+                                    showToast('Erro ao restaurar venda.', 'error');
+                                  }
                                 }
-                              }
+                              });
                             }}
                             className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-100 transition-colors font-medium text-sm"
                           >
@@ -4219,6 +4837,153 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {currentPage === 'my-payments' && (() => {
+                const myPayments = payments.filter(p => {
+                  if (p.vendedor_id !== currentUser.id) return false;
+                  if (paymentDateFrom && p.created_at < paymentDateFrom) return false;
+                  if (paymentDateTo && p.created_at > paymentDateTo + 'T23:59:59') return false;
+                  if (paymentStatusFilter === 'paid' && p.status !== 'paid') return false;
+                  if (paymentStatusFilter === 'pending' && p.status === 'paid') return false;
+                  return true;
+                }).sort((a, b) => b.created_at.localeCompare(a.created_at));
+                const totalReceived = myPayments.filter(p => p.status === 'paid').reduce((sum, p) => sum + p.amount, 0);
+                const paidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && s.commission_paid && s.status === SaleStatus.PAGO);
+                const unpaidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && !s.commission_paid && s.status === SaleStatus.PAGO);
+                const pendingAmount = unpaidCommissionSales.reduce((sum, s) => {
+                  const rate = currentUser.commissions?.[s.service] ?? currentUser.commission ?? 10;
+                  return sum + (s.value * rate / 100);
+                }, 0);
+
+                return (
+                <div className="space-y-6">
+                  <h2 className="text-2xl font-black text-zinc-900 tracking-tight">Meus Pagamentos</h2>
+
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="bg-white rounded-2xl p-6 border border-black/5 shadow-sm">
+                      <p className="text-xs font-bold text-zinc-400 uppercase mb-1">Total Recebido</p>
+                      <p className="text-3xl font-black text-emerald-600">R$ {totalReceived.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                      <p className="text-xs text-zinc-400 mt-1">{myPayments.filter(p => p.status === 'paid').length} pagamento(s)</p>
+                    </div>
+                    <div className="bg-white rounded-2xl p-6 border border-black/5 shadow-sm">
+                      <p className="text-xs font-bold text-zinc-400 uppercase mb-1">Comissão Pendente</p>
+                      <p className="text-3xl font-black text-amber-600">R$ {pendingAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                      <p className="text-xs text-zinc-400 mt-1">{unpaidCommissionSales.length} venda(s) não pagas</p>
+                    </div>
+                    <div className="bg-white rounded-2xl p-6 border border-black/5 shadow-sm">
+                      <p className="text-xs font-bold text-zinc-400 uppercase mb-1">Vendas com Comissão Paga</p>
+                      <p className="text-3xl font-black text-indigo-600">{paidCommissionSales.length}</p>
+                      <p className="text-xs text-zinc-400 mt-1">de {paidCommissionSales.length + unpaidCommissionSales.length} total</p>
+                    </div>
+                  </div>
+
+                  {/* Payment History */}
+                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                    <div className="p-6 border-b border-black/5 flex flex-col gap-4">
+                      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <h3 className="font-bold text-zinc-900 text-lg">Histórico de Pagamentos</h3>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="date"
+                            value={paymentDateFrom}
+                            onChange={(e) => setPaymentDateFrom(e.target.value)}
+                            className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"
+                            title="Data início"
+                          />
+                          <span className="text-zinc-400 text-xs">até</span>
+                          <input
+                            type="date"
+                            value={paymentDateTo}
+                            onChange={(e) => setPaymentDateTo(e.target.value)}
+                            className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"
+                            title="Data fim"
+                          />
+                          {(paymentDateFrom || paymentDateTo) && (
+                            <button onClick={() => { setPaymentDateFrom(''); setPaymentDateTo(''); }} className="text-xs text-red-500 hover:text-red-700 font-bold">✕</button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        {[
+                          { key: 'all' as const, label: 'Todos', count: myPayments.length },
+                          { key: 'paid' as const, label: '✅ Pagos', count: myPayments.filter(p => p.status === 'paid').length },
+                          { key: 'pending' as const, label: '⏳ Pendentes', count: myPayments.filter(p => p.status !== 'paid').length },
+                        ].map(f => (
+                          <button
+                            key={f.key}
+                            onClick={() => setPaymentStatusFilter(f.key)}
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all ${
+                              paymentStatusFilter === f.key
+                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100'
+                                : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                            }`}
+                          >
+                            {f.label} ({f.count})
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {myPayments.length === 0 ? (
+                      <div className="p-12 text-center">
+                        <Wallet className="w-12 h-12 text-zinc-300 mx-auto mb-3" />
+                        <p className="text-zinc-400 font-medium">Nenhum pagamento registrado ainda.</p>
+                        <p className="text-zinc-300 text-sm mt-1">Seus pagamentos de comissão aparecerão aqui.</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                          <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                            <tr>
+                              <th className="px-6 py-3 font-semibold">Data</th>
+                              <th className="px-6 py-3 font-semibold">Valor</th>
+                              <th className="px-6 py-3 font-semibold">Status</th>
+                              <th className="px-6 py-3 font-semibold">Vendas Incluídas</th>
+                              <th className="px-6 py-3 font-semibold">Comprovante</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-100">
+                            {myPayments.map(payment => (
+                              <tr key={payment.id} className="hover:bg-zinc-50 transition-all">
+                                <td className="px-6 py-4 text-sm font-medium text-zinc-900">
+                                  {new Date(payment.created_at).toLocaleDateString('pt-BR')}
+                                </td>
+                                <td className="px-6 py-4 text-sm font-black text-emerald-600">
+                                  R$ {payment.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                                </td>
+                                <td className="px-6 py-4">
+                                  <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${
+                                    payment.status === 'paid' ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
+                                  }`}>
+                                    {payment.status === 'paid' ? '✅ Pago' : '⏳ Pendente'}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 text-sm text-zinc-500">
+                                  {payment.sales_ids?.length || 0} venda(s)
+                                </td>
+                                <td className="px-6 py-4">
+                                  {payment.receipt_url ? (
+                                    <button
+                                      onClick={() => handleViewReceipt(payment.receipt_url!)}
+                                      className="text-xs font-bold text-indigo-600 hover:underline"
+                                    >
+                                      Ver Comprovante
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-zinc-300">—</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                );
+              })()}
+
               {currentPage === 'profile' && (
                 <div className="max-w-2xl mx-auto">
                   <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5">
@@ -4449,48 +5214,101 @@ export default function App() {
                 <AlertCircle className="w-8 h-8 text-amber-600" />
               </div>
               <h3 className="text-xl font-bold text-zinc-900 mb-2">Comprovante de Pagamento</h3>
-              <p className="text-zinc-500 mb-6 text-sm">Anexe o comprovante ou marque diretamente como pago.</p>
+              <p className="text-zinc-500 mb-6 text-sm">Anexe o comprovante e confirme o valor realmente pago.</p>
               
               {isUploadingReceipt ? (
                 <div className="py-8">
                   <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
-                  <p className="text-sm font-semibold text-zinc-600">Enviando comprovante e atualizando status...</p>
+                  <p className="text-sm font-semibold text-zinc-600">Enviando e auditando comprovante...</p>
+                  <p className="text-xs text-zinc-400 mt-1">A IA está verificando o comprovante</p>
                 </div>
               ) : (
                 <>
-                  <div className="mb-6">
-                    <div className="relative border-2 border-dashed border-zinc-200 rounded-2xl p-8 hover:border-indigo-500 transition-colors bg-zinc-50">
+                  {/* File upload area */}
+                  <div className="mb-4">
+                    <div className={`relative border-2 border-dashed rounded-2xl p-6 transition-colors ${
+                      (window as any).__receiptFile ? 'border-emerald-400 bg-emerald-50' : 'border-zinc-200 hover:border-indigo-500 bg-zinc-50'
+                    }`}>
                       <input 
                         type="file" 
                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20"
                         accept="image/*,.pdf"
-                        onChange={async (e) => {
+                        onChange={(e) => {
                           const file = e.target.files?.[0];
-                          if (!file || !salePendingReceipt) return;
-                          const pendingSaleId = salePendingReceipt.id;
-                          setIsUploadingReceipt(true);
-                          try {
-                            await handleUploadReceipt(pendingSaleId, file);
-                            await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
-                            showToast('Venda marcada como PAGA com comprovante!', 'success');
-                            setSalePendingReceipt(null);
-                          } catch (err: any) {
-                            console.error('Comprovante upload error:', err);
-                            showToast('Erro: ' + err.message, 'error');
-                          } finally {
-                            setIsUploadingReceipt(false);
+                          if (file) {
+                            (window as any).__receiptFile = file;
+                            // Force re-render
+                            setSalePendingReceipt({...salePendingReceipt});
                           }
                         }}
                       />
-                      <Upload className="w-8 h-8 text-zinc-400 mx-auto mb-3" />
-                      <p className="text-sm font-semibold text-zinc-700">Clique para anexar comprovante</p>
-                      <p className="text-xs text-zinc-500 mt-1">Imagens ou PDF (máx. 5MB)</p>
+                      {(window as any).__receiptFile ? (
+                        <>
+                          <CheckCircle className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
+                          <p className="text-sm font-semibold text-emerald-700">{(window as any).__receiptFile.name}</p>
+                          <p className="text-xs text-emerald-500 mt-1">Clique para trocar</p>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-8 h-8 text-zinc-400 mx-auto mb-3" />
+                          <p className="text-sm font-semibold text-zinc-700">Clique para anexar comprovante</p>
+                          <p className="text-xs text-zinc-500 mt-1">Imagens ou PDF (máx. 5MB)</p>
+                        </>
+                      )}
                     </div>
+                  </div>
+
+                  {/* Confirmed value field */}
+                  <div className="mb-6 text-left">
+                    <label className="text-sm font-semibold text-zinc-700 block mb-2">Valor Realmente Pago (R$)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      defaultValue={salePendingReceipt.value || 0}
+                      id="receipt-confirmed-value"
+                      className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none text-lg font-bold text-zinc-900"
+                      placeholder="0.00"
+                    />
+                    <p className="text-xs text-zinc-400 mt-1">Valor do produto: R$ {(salePendingReceipt.value || 0).toFixed(2)} — Ajuste se o cliente pagou valor diferente</p>
                   </div>
 
                   <div className="flex flex-col gap-3">
                     <button 
-                      onClick={() => setSalePendingReceipt(null)}
+                      disabled={!(window as any).__receiptFile}
+                      onClick={async () => {
+                        const file = (window as any).__receiptFile;
+                        if (!file || !salePendingReceipt) return;
+                        const confirmedValueInput = document.getElementById('receipt-confirmed-value') as HTMLInputElement;
+                        const confirmedValue = confirmedValueInput ? parseFloat(confirmedValueInput.value) : salePendingReceipt.value;
+                        const pendingSaleId = salePendingReceipt.id;
+                        setIsUploadingReceipt(true);
+                        try {
+                          await handleUploadReceipt(pendingSaleId, file, confirmedValue);
+                          await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
+                          setSalePendingReceipt(null);
+                          (window as any).__receiptFile = null;
+                        } catch (err: any) {
+                          console.error('Comprovante upload error:', err);
+                          showToast('Erro: ' + err.message, 'error');
+                        } finally {
+                          setIsUploadingReceipt(false);
+                        }
+                      }}
+                      className={`w-full px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${
+                        (window as any).__receiptFile 
+                          ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-100' 
+                          : 'bg-zinc-100 text-zinc-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <Upload className="w-4 h-4" />
+                      Enviar e Auditar
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setSalePendingReceipt(null);
+                        (window as any).__receiptFile = null;
+                      }}
                       className="w-full px-6 py-3 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
                     >
                       Cancelar
@@ -4578,7 +5396,7 @@ export default function App() {
                 Excluir Lead?
               </h3>
               <p className="text-zinc-500 mb-8">
-                {currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.GERENTE || currentUser?.role === UserRole.SUPERVISOR 
+                {currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR 
                   ? 'Esta ação não pode ser desfeita. Todos os dados deste lead serão removidos permanentemente.'
                   : 'O administrador será notificado e precisará aprovar a exclusão deste lead.'}
               </p>
@@ -4796,6 +5614,13 @@ export default function App() {
                     <label className="text-sm font-semibold text-zinc-700">Comissão (%)</label>
                     <input name="commission" type="number" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="10" />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-zinc-700">Cargo</label>
+                    <select name="role" defaultValue={UserRole.VENDEDOR} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none bg-white">
+                      <option value={UserRole.VENDEDOR}>Vendedor</option>
+                      <option value={UserRole.SUPERVISOR}>Supervisor</option>
+                                          </select>
+                  </div>
                 </div>
                 <div className="flex gap-4 pt-4">
                   <button 
@@ -4819,6 +5644,36 @@ export default function App() {
         )}
       </AnimatePresence>
       <AnimatePresence>
+        {/* Image/PDF Viewer Modal */}
+        {viewingImageUrl && (
+          <div 
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setViewingImageUrl(null)}
+          >
+            <button 
+              onClick={() => setViewingImageUrl(null)} 
+              className="absolute top-6 right-6 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-all z-10"
+            >
+              <X className="w-6 h-6 text-white" />
+            </button>
+            {viewingImageUrl.includes('application/pdf') ? (
+              <iframe 
+                src={viewingImageUrl} 
+                title="Comprovante PDF"
+                className="w-full max-w-4xl h-[90vh] rounded-2xl shadow-2xl bg-white"
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <img 
+                src={viewingImageUrl} 
+                alt="Comprovante" 
+                className="max-w-full max-h-[90vh] object-contain rounded-2xl shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              />
+            )}
+          </div>
+        )}
+
         {editingSeller && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
             <motion.div 
@@ -4848,7 +5703,8 @@ export default function App() {
                   commission: Number(formData.get('commission')),
                   recurring_commission: Number(formData.get('recurring_commission')),
                   commissions,
-                  pix_key: formData.get('pix_key') as string
+                  pix_key: formData.get('pix_key') as string,
+                  role: formData.get('role') as UserRole
                 });
                 setEditingSeller(null);
               }} className="p-8 space-y-6 max-h-[80vh] overflow-y-auto">
@@ -4868,6 +5724,13 @@ export default function App() {
                   <div className="space-y-2 md:col-span-1">
                     <label className="text-sm font-semibold text-zinc-700">Chave PIX</label>
                     <input name="pix_key" type="text" defaultValue={editingSeller.pix_key || ''} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="E-mail, CPF, Telefone ou Chave Aleatória" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-zinc-700">Cargo</label>
+                    <select name="role" defaultValue={editingSeller.role} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none bg-white">
+                      <option value={UserRole.VENDEDOR}>Vendedor</option>
+                      <option value={UserRole.SUPERVISOR}>Supervisor</option>
+                                          </select>
                   </div>
                   
                   <div className="md:col-span-2 pt-4 border-t border-black/5">
@@ -4951,7 +5814,7 @@ export default function App() {
                           className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500"
                         />
                         <div className="flex-1">
-                          <p className="text-sm font-bold text-zinc-900">{sale.name || 'Cliente'}</p>
+                          <p className="text-sm font-bold text-zinc-900">{sale.phone}</p>
                           <p className="text-xs text-zinc-500">{sale.service} - {new Date(sale.paid_at || '').toLocaleDateString()}</p>
                         </div>
                         <p className="text-sm font-bold text-emerald-600">R$ {calculateCommission(sale, payingSeller).toLocaleString()}</p>

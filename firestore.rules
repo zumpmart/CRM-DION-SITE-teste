@@ -28,10 +28,6 @@ service cloud.firestore {
     function isSupervisor() {
       return isAuthenticated() && getUserRole() == 'SUPERVISOR';
     }
-    
-    function isGerente() {
-      return isAuthenticated() && getUserRole() == 'GERENTE';
-    }
 
     // ===============================================================
     // Rules
@@ -48,7 +44,6 @@ service cloud.firestore {
       allow read: if isAuthenticated() && (
         isAdmin() || 
         isSupervisor() || 
-        isGerente() ||
         resource.data.vendedor_id == request.auth.uid || 
         resource.data.transfer_to == request.auth.uid || 
         resource.data.status == 'PAGO'
@@ -57,7 +52,6 @@ service cloud.firestore {
       allow update: if isAuthenticated() && (
         isAdmin() || 
         isSupervisor() || 
-        isGerente() ||
         resource.data.vendedor_id == request.auth.uid || 
         resource.data.transfer_to == request.auth.uid
       );
@@ -68,21 +62,19 @@ service cloud.firestore {
       allow read: if isAuthenticated() && (
         isAdmin() || 
         isSupervisor() || 
-        isGerente() ||
         resource.data.vendedor_id == request.auth.uid
       );
-      allow create: if isAuthenticated() && (request.resource.data.vendedor_id == request.auth.uid || isAdmin() || isSupervisor() || isGerente());
+      allow create: if isAuthenticated() && (request.resource.data.vendedor_id == request.auth.uid || isAdmin() || isSupervisor());
       allow update: if isAuthenticated() && (
         isAdmin() || 
         isSupervisor() || 
-        isGerente() ||
         resource.data.vendedor_id == request.auth.uid
       );
       allow delete: if isAdmin();
     }
     
     match /audit_logs/{logId} {
-      allow read: if isAdmin() || isSupervisor() || isGerente();
+      allow read: if isAdmin() || isSupervisor();
       allow create: if isAuthenticated();
       allow update: if false;
       allow delete: if isAdmin();

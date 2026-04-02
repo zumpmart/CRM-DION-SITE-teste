@@ -1,6 +1,5 @@
 export enum UserRole {
   ADMIN = "ADMIN",
-  GERENTE = "GERENTE",
   SUPERVISOR = "SUPERVISOR",
   VENDEDOR = "VENDEDOR",
 }
@@ -18,7 +17,10 @@ export enum SaleStatus {
 
 export enum ReceiptStatus {
   ENVIADO = "ENVIADO",
-  CONFERIDO = "CONFERIDO",
+  AUDITADO_APROVADO = "AUDITADO_APROVADO",
+  AUDITADO_DIVERGENTE = "AUDITADO_DIVERGENTE",
+  DUPLICADO = "DUPLICADO",
+  REJEITADO = "REJEITADO",
   PAGO = "PAGO",
 }
 
@@ -90,6 +92,8 @@ export interface Sale {
   paid_at?: string;
   commission_paid?: boolean;
   receipt_id?: string;
+  receipt_rejected?: boolean;
+  receipt_rejection_reason?: string;
   deleted_at?: string;
   deleted_by?: string;
   notes?: string;
@@ -103,6 +107,15 @@ export interface Receipt {
   file_path: string;
   status: ReceiptStatus;
   value: number;
+  confirmed_value?: number;
+  ocr_value?: number | null;
+  ocr_date?: string | null;
+  ocr_raw_text?: string;
+  audit_status?: 'approved' | 'divergent' | 'duplicate' | 'error' | 'pending';
+  audit_details?: string;
+  image_hash?: string;
+  audited_at?: string;
+  paid_date?: string;
   created_at: string;
 }
 
