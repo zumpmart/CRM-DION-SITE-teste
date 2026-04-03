@@ -235,6 +235,7 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [editingSale, setEditingSale] = useState<Sale | null>(null);
+  const [selectedContract, setSelectedContract] = useState<Sale | null>(null);
   const [editingSeller, setEditingSeller] = useState<UserProfile | null>(null);
   const [payingSeller, setPayingSeller] = useState<UserProfile | null>(null);
   const [salePendingReceipt, setSalePendingReceipt] = useState<Sale | null>(null);
@@ -603,6 +604,7 @@ export default function App() {
   const mySales = useMemo(() => {
     return sales.filter(sale => {
       if (sale.status === SaleStatus.DELETED) return false;
+      if (sale.sale_type === SaleType.RECORRENTE) return false;
       
       const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR;
       if (!isAdminOrManager) {
@@ -1018,7 +1020,7 @@ export default function App() {
       await addLog(currentUser, `Registrou novo lead: ${leadData.phone}${isReturning ? ' (cliente retornante)' : ''}`, docRef.id);
       clearFilters();
       setTimeout(() => {
-        setCurrentPage('sales');
+        setCurrentPage(leadData.sale_type === SaleType.RECORRENTE ? 'contracts' : 'sales');
       }, 100);
     } catch (error: any) {
       showToast('Erro ao salvar lead: ' + error.message, 'error');
@@ -1213,31 +1215,7 @@ export default function App() {
 
 
 
-  const handleExport = () => {
-    const csvContent = [
-      ['Data', 'Vendedor', 'Nome', 'WhatsApp', 'Serviço', 'Valor', 'Status', 'Data Retorno'],
-      ...mySales.map(sale => [
-        new Date(sale.created_at).toLocaleDateString(),
-        users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido',
-        sale.name || 'Cliente',
-        sale.phone,
-        sale.service,
-        sale.value.toString(),
-        sale.status,
-        ''
-      ])
-    ].map(row => row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(",")).join("\n");
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `vendas_${new Date().toISOString().split('T')[0]}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
 
   const handleDeleteSale = async (saleId: string | null) => {
     if (!currentUser || !saleId) return;
@@ -2617,7 +2595,7 @@ export default function App() {
                           .map(sale => {
                             const isOverdue = new Date() > new Date(`${sale.next_billing_date}T23:59:59`) && sale.contract_status === ContractStatus.ATIVO;
                             return (
-                              <tr key={sale.id} className="hover:bg-zinc-50/50 transition-colors">
+                              <tr key={sale.id} className="hover:bg-zinc-50/50 transition-colors cursor-pointer" onClick={() => setSelectedContract(sale)}>
                                 <td className="p-4">
                                   <div className="font-bold text-zinc-900">{sale.name}</div>
                                   <div className="text-xs text-zinc-500">{sale.phone}</div>
@@ -2681,6 +2659,181 @@ export default function App() {
                 </div>
               )}
 
+              {/* Contract Detail Modal */}
+              <AnimatePresence>
+                {selectedContract && (() => {
+                  const contract = selectedContract;
+                  const customer = customers.find(c => c.id === contract.customer_id);
+                  const seller = users.find(u => u.id === contract.vendedor_id);
+                  const isOverdue = new Date() > new Date(`${contract.next_billing_date}T23:59:59`) && contract.contract_status === ContractStatus.ATIVO;
+                  return (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedContract(null)}>
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {/* Header */}
+                        <div className="p-6 border-b border-black/5 flex justify-between items-center">
+                          <div>
+                            <h3 className="text-xl font-bold text-zinc-900">📋 Contrato</h3>
+                            <p className="text-sm text-zinc-500">{contract.name || contract.phone}</p>
+                          </div>
+                          <button onClick={() => setSelectedContract(null)} className="p-2 hover:bg-zinc-100 rounded-full transition-all">
+                            <X className="w-5 h-5 text-zinc-400" />
+                          </button>
+                        </div>
+
+                        <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+                          {/* Cliente */}
+                          <div className="bg-zinc-50 p-4 rounded-2xl space-y-2">
+                            <p className="text-xs font-bold text-zinc-400 uppercase">👤 Cliente</p>
+                            <div className="grid grid-cols-2 gap-3 text-sm">
+                              <div>
+                                <p className="text-zinc-500 text-xs">Nome</p>
+                                <p className="font-bold text-zinc-900">{contract.name || 'Não informado'}</p>
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Telefone</p>
+                                <p className="font-bold text-zinc-900">{contract.phone}</p>
+                              </div>
+                              {customer && (
+                                <>
+                                  <div>
+                                    <p className="text-zinc-500 text-xs">Cliente desde</p>
+                                    <p className="font-bold text-zinc-900">{new Date(customer.first_purchase_date).toLocaleDateString('pt-BR')}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-zinc-500 text-xs">Total gasto</p>
+                                    <p className="font-bold text-emerald-600">R$ {customer.total_spent?.toLocaleString() || '0'}</p>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Serviço */}
+                          <div className="bg-indigo-50/50 p-4 rounded-2xl space-y-2">
+                            <p className="text-xs font-bold text-indigo-400 uppercase">📦 Serviço</p>
+                            <div className="grid grid-cols-2 gap-3 text-sm">
+                              <div>
+                                <p className="text-zinc-500 text-xs">Serviço(s)</p>
+                                <p className="font-bold text-zinc-900">{(contract.services || [contract.service]).join(', ')}</p>
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Valor</p>
+                                <p className="font-black text-emerald-600">R$ {contract.value.toLocaleString()}</p>
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Ciclo</p>
+                                <p className="font-bold text-zinc-900 capitalize">{contract.billing_cycle || 'Mensal'}</p>
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Vendedor</p>
+                                <p className="font-bold text-zinc-900">{seller?.name || 'Desconhecido'}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Contrato */}
+                          <div className="bg-amber-50/50 p-4 rounded-2xl space-y-2">
+                            <p className="text-xs font-bold text-amber-500 uppercase">📄 Contrato</p>
+                            <div className="grid grid-cols-2 gap-3 text-sm">
+                              <div>
+                                <p className="text-zinc-500 text-xs">Status</p>
+                                <span className={`inline-block px-2 py-1 rounded-md text-xs font-bold uppercase ${
+                                  contract.contract_status === ContractStatus.ATIVO ? 'bg-emerald-100 text-emerald-700' :
+                                  contract.contract_status === ContractStatus.INADIMPLENTE ? 'bg-red-100 text-red-700' :
+                                  contract.contract_status === ContractStatus.PAUSADO ? 'bg-amber-100 text-amber-700' :
+                                  'bg-zinc-100 text-zinc-700'
+                                }`}>
+                                  {contract.contract_status}
+                                </span>
+                                {isOverdue && contract.contract_status !== ContractStatus.INADIMPLENTE && (
+                                  <span className="ml-2 text-[10px] font-bold text-red-500 animate-pulse">VENCIDO!</span>
+                                )}
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Início</p>
+                                <p className="font-bold text-zinc-900">{contract.contract_start ? new Date(`${contract.contract_start}T12:00:00`).toLocaleDateString('pt-BR') : '-'}</p>
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Próx. cobrança</p>
+                                <p className={`font-bold ${isOverdue ? 'text-red-600' : 'text-zinc-900'}`}>{contract.next_billing_date ? new Date(`${contract.next_billing_date}T12:00:00`).toLocaleDateString('pt-BR') : '-'}</p>
+                              </div>
+                              <div>
+                                <p className="text-zinc-500 text-xs">Status venda</p>
+                                <p className="font-bold text-zinc-900">{getStatusLabel(contract.status)}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Notas */}
+                          {contract.notes && (
+                            <div className="bg-zinc-50 p-4 rounded-2xl">
+                              <p className="text-xs font-bold text-zinc-400 uppercase mb-1">📝 Notas</p>
+                              <p className="text-sm text-zinc-700">{contract.notes}</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="p-6 border-t border-black/5 flex flex-wrap gap-2">
+                          <a 
+                            href={`https://wa.me/${contract.phone.replace(/\D/g, '')}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1.5 px-4 py-2 bg-green-50 text-green-600 rounded-xl text-sm font-bold hover:bg-green-100 transition-colors"
+                          >
+                            <MessageCircle className="w-4 h-4" /> WhatsApp
+                          </a>
+                          <button 
+                            onClick={() => { setEditingSale(contract); setSelectedContract(null); }}
+                            className="flex items-center gap-1.5 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl text-sm font-bold hover:bg-indigo-100 transition-colors"
+                          >
+                            <Edit2 className="w-4 h-4" /> Editar
+                          </button>
+                          {contract.contract_status === ContractStatus.ATIVO && (
+                            <button 
+                              onClick={() => { handleContractAction(contract.id, 'pay'); setSelectedContract(null); }}
+                              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold hover:bg-emerald-100 transition-colors"
+                            >
+                              <CheckCircle className="w-4 h-4" /> Confirmar Pagamento
+                            </button>
+                          )}
+                          {contract.contract_status === ContractStatus.ATIVO && (
+                            <button 
+                              onClick={() => { handleContractAction(contract.id, 'pause'); setSelectedContract(null); }}
+                              className="flex items-center gap-1.5 px-4 py-2 bg-amber-50 text-amber-600 rounded-xl text-sm font-bold hover:bg-amber-100 transition-colors"
+                            >
+                              Pausar
+                            </button>
+                          )}
+                          {contract.contract_status !== ContractStatus.ATIVO && contract.contract_status !== ContractStatus.CANCELADO && (
+                            <button 
+                              onClick={() => { handleContractAction(contract.id, 'resume'); setSelectedContract(null); }}
+                              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold hover:bg-emerald-100 transition-colors"
+                            >
+                              Retomar
+                            </button>
+                          )}
+                          {contract.contract_status !== ContractStatus.CANCELADO && (
+                            <button 
+                              onClick={() => { handleContractAction(contract.id, 'cancel'); setSelectedContract(null); }}
+                              className="flex items-center gap-1.5 px-4 py-2 bg-red-50 text-red-600 rounded-xl text-sm font-bold hover:bg-red-100 transition-colors"
+                            >
+                              Cancelar Contrato
+                            </button>
+                          )}
+                        </div>
+                      </motion.div>
+                    </div>
+                  );
+                })()}
+              </AnimatePresence>
+
               {currentPage === 'new-lead' && (
                 <div className="max-w-2xl mx-auto">
                   <div className="bg-white p-8 rounded-3xl shadow-sm border border-black/5">
@@ -2694,8 +2847,9 @@ export default function App() {
                       const formData = new FormData(e.currentTarget);
                       handleAddLead({
                         phone: formData.get('phone'),
+                        name: newLeadSaleType === SaleType.RECORRENTE ? formData.get('name') : '',
                         services: newLeadServices,
-                        service: newLeadServices[0], // fallback for old UI components
+                        service: newLeadServices[0],
                         value: Number(formData.get('value')),
                         notes: formData.get('notes') || '',
                         created_at: formData.get('date') ? new Date(`${formData.get('date')}T12:00:00`).toISOString() : new Date().toISOString(),
@@ -2758,6 +2912,10 @@ export default function App() {
                         
                         {newLeadSaleType === SaleType.RECORRENTE && (
                           <>
+                            <div className="space-y-2 md:col-span-2">
+                              <label className="text-sm font-semibold text-zinc-700">Nome do Cliente *</label>
+                              <input name="name" type="text" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="Nome completo do cliente" />
+                            </div>
                             <div className="space-y-2">
                               <label className="text-sm font-semibold text-zinc-700">Ciclo de Cobrança</label>
                               <select name="billing_cycle" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none">
@@ -3054,12 +3212,7 @@ export default function App() {
                             {viewMode === 'list' ? <LayoutDashboard className="w-4 h-4" /> : <List className="w-4 h-4" />}
                             {viewMode === 'list' ? 'Kanban' : 'Lista'}
                           </button>
-                          <button 
-                            onClick={handleExport}
-                            className="px-4 py-2 bg-indigo-600 rounded-xl text-sm font-semibold text-white hover:bg-indigo-700 transition-all"
-                          >
-                            Exportar
-                          </button>
+
                         </div>
                       </div>
 
@@ -3189,7 +3342,7 @@ export default function App() {
                                   {/* Stale AGUARDANDO alert in list */}
                                   {isStaleAguardando(sale as Sale) && (
                                     <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full w-fit animate-pulse">
-                                      ⚠️ Sem atendimento há {getStaleHours(sale as Sale)}h
+                                      ⚠️ Sem atendimento há {getStaleHours(sale as Sale)}h{getStaleHours(sale as Sale) >= 12 ? ' — Recomendamos arquivar' : ''}
                                     </span>
                                   )}
                                   {/* Receipt Rejected alert in list */}
@@ -3349,17 +3502,9 @@ export default function App() {
                                   )}
                                   {/* Stale AGUARDANDO alert */}
                                   {stale && (
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg animate-pulse">
-                                        ⚠️ Sem atendimento há {getStaleHours(sale)}h
-                                      </span>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(sale.id, SaleStatus.ARQUIVADO); }}
-                                        className="text-[10px] font-bold text-zinc-600 bg-zinc-100 px-2 py-1 rounded-lg hover:bg-zinc-200 transition-colors whitespace-nowrap"
-                                      >
-                                        → Arquivar
-                                      </button>
-                                    </div>
+                                    <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg animate-pulse">
+                                      ⚠️ Sem atendimento há {getStaleHours(sale)}h{getStaleHours(sale) >= 12 ? ' — Recomendamos arquivar' : ''}
+                                    </span>
                                   )}
                                   {/* Receipt Rejected alert */}
                                   {sale.receipt_rejected && (
