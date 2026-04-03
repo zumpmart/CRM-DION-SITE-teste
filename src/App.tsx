@@ -145,7 +145,7 @@ const SERVICES = ['Logotipo', 'Flayer', 'Faixada', 'Site', 'Outros'];
 const STATUS_LABELS: Record<string, string> = {
   [SaleStatus.AGUARDANDO]: 'Atendimento Iniciado',
   [SaleStatus.PENDENTE]: 'Projeto Iniciado',
-  [SaleStatus.REMARKETING]: 'REMARKETING',
+
   [SaleStatus.PAGO]: 'PAGO',
   [SaleStatus.CANCELADO]: 'CANCELADO',
   [SaleStatus.ARQUIVADO]: 'ARQUIVADO',
@@ -155,7 +155,7 @@ const STATUS_LABELS: Record<string, string> = {
 const getStatusLabel = (status: string) => STATUS_LABELS[status] || status;
 
 // Statuses hidden from Kanban/List columns
-const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO];
+const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING];
 
 // --- Stale AGUARDANDO detection (>8h) ---
 const STALE_HOURS = 8;
@@ -170,25 +170,7 @@ const getStaleHours = (sale: Sale) => {
   return Math.floor(elapsed / (60 * 60 * 1000));
 };
 
-// --- Remarketing Timer (8h to act, warning at 6-8h) ---
-const getRemarketingTimeInfo = (sale: Sale) => {
-  if (sale.status !== SaleStatus.REMARKETING) return null;
-  const elapsedMs = Date.now() - new Date(sale.updated_at).getTime();
-  const elapsedHours = elapsedMs / (60 * 60 * 1000);
-  const remainingMs = Math.max(0, 8 * 60 * 60 * 1000 - elapsedMs);
-  const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
-  const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
-  return {
-    elapsedHours,
-    remainingHours,
-    remainingMinutes,
-    isWarning: elapsedHours >= 6 && elapsedHours < 8,
-    isExpired: elapsedHours >= 8,
-    label: elapsedHours >= 8
-      ? '⏰ Prazo expirado!'
-      : `${remainingHours}h ${remainingMinutes}m restantes`
-  };
-};
+
 
 // --- PAGO visibility: only show if paid today ---
 const isPagoVisibleInFlow = (sale: Sale) => {
@@ -265,8 +247,7 @@ export default function App() {
   });
   const [showFilters, setShowFilters] = useState(false);
   const [viewMode, setViewMode] = useState<'list' | 'kanban'>('kanban');
-  const [remarketingSaleId, setRemarketingSaleId] = useState<string | null>(null);
-  const [remarketingDate, setRemarketingDate] = useState<string>('');
+
   const [deletingSaleId, setDeletingSaleId] = useState<string | null>(null);
 
   const [dateRange, setDateRange] = useState({
@@ -572,7 +553,7 @@ export default function App() {
     // Cleanup removed from frontend to prevent destructive actions
   }, [currentUser]);
 
-  // --- Timer refresh for remarketing countdown and stale AGUARDANDO alerts ---
+  // --- Timer refresh for stale AGUARDANDO alerts ---
   const [, setTimerTick] = useState(0);
   useEffect(() => {
     const interval = setInterval(() => setTimerTick(t => t + 1), 60000);
@@ -1209,11 +1190,7 @@ export default function App() {
       return;
     }
 
-    if (newStatus === SaleStatus.REMARKETING && !returnDate) {
-      setRemarketingSaleId(saleId);
-      setRemarketingDate(getLocalISODate());
-      return;
-    }
+
 
     const updates: any = { 
       status: newStatus, 
@@ -1224,11 +1201,7 @@ export default function App() {
       updates.paid_at = new Date().toISOString();
     }
     
-    if (newStatus === SaleStatus.REMARKETING && returnDate) {
-      updates.return_date = returnDate;
-    } else if (newStatus !== SaleStatus.REMARKETING) {
-      updates.return_date = null;
-    }
+
 
     try {
       await updateDoc(doc(db, 'sales', saleId), updates);
@@ -1251,7 +1224,7 @@ export default function App() {
         sale.service,
         sale.value.toString(),
         sale.status,
-        sale.return_date ? new Date(sale.return_date + 'T00:00:00').toLocaleDateString('pt-BR') : ''
+        ''
       ])
     ].map(row => row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(",")).join("\n");
 
@@ -2229,10 +2202,7 @@ export default function App() {
                       <p className="text-[10px] font-bold text-emerald-400 uppercase mb-1">Pago</p>
                       <p className="text-xl font-black text-emerald-600">{stats.statusCounts[SaleStatus.PAGO]}</p>
                     </div>
-                    <div className="bg-white p-4 rounded-2xl border border-black/5 shadow-sm">
-                      <p className="text-[10px] font-bold text-amber-500 uppercase mb-1">Remarketing</p>
-                      <p className="text-xl font-black text-amber-600">{stats.statusCounts[SaleStatus.REMARKETING] || 0}</p>
-                    </div>
+
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -2538,7 +2508,6 @@ export default function App() {
                                       ? 'text-red-600 bg-red-50 animate-pulse'
                                       : s.status === SaleStatus.AGUARDANDO ? 'text-orange-600 bg-orange-50'
                                       : s.status === SaleStatus.PENDENTE ? 'text-amber-600 bg-amber-50'
-                                      : s.status === SaleStatus.REMARKETING ? 'text-purple-600 bg-purple-50'
                                       : s.status === SaleStatus.PAGO ? 'text-emerald-600 bg-emerald-50'
                                       : 'text-zinc-500 bg-zinc-100';
                                     return (
@@ -3126,7 +3095,7 @@ export default function App() {
                                   className="w-full px-3 py-2 rounded-lg border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                                 >
                                   <option value="">Todos</option>
-                                  {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED).map(s => (
+                                  {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.REMARKETING).map(s => (
                                     <option key={s} value={s}>{getStatusLabel(s)}</option>
                                   ))}
                                 </select>
@@ -3215,7 +3184,7 @@ export default function App() {
                                       'bg-zinc-100 text-zinc-600'
                                     }`}
                                   >
-                                    {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.CANCELADO).map(s => <option key={s} value={s}>{getStatusLabel(s)}</option>)}
+                                    {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.CANCELADO && s !== SaleStatus.REMARKETING).map(s => <option key={s} value={s}>{getStatusLabel(s)}</option>)}
                                   </select>
                                   {/* Stale AGUARDANDO alert in list */}
                                   {isStaleAguardando(sale as Sale) && (
@@ -3242,16 +3211,7 @@ export default function App() {
                                   )}
                                   </>);
                                   })()}
-                                  {/* Remarketing timer in list */}
-                                  {(() => {
-                                    const rmk = getRemarketingTimeInfo(sale as Sale);
-                                    if (!rmk) return null;
-                                    return (
-                                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full w-fit ${rmk.isExpired ? 'text-red-600 bg-red-50 animate-pulse' : rmk.isWarning ? 'text-amber-600 bg-amber-50 animate-pulse' : 'text-emerald-600 bg-emerald-50'}`}>
-                                        ⏱️ {rmk.label}
-                                      </span>
-                                    );
-                                  })()}
+
 
                                 </div>
                               </td>
@@ -3363,7 +3323,7 @@ export default function App() {
                             <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-3">
                               {statusSales.map(sale => {
                                 const stale = isStaleAguardando(sale);
-                                const rmkInfo = getRemarketingTimeInfo(sale);
+
                                 const isPago = sale.status === SaleStatus.PAGO;
                                 const isReceiptLocked = currentUser.role === UserRole.VENDEDOR && receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
                                 const isLocked = isPago || isReceiptLocked;
@@ -3372,7 +3332,7 @@ export default function App() {
                                   key={sale.id}
                                   draggable={!isLocked}
                                   onDragStart={(e) => isLocked ? e.preventDefault() : handleDragStart(e, sale.id)}
-                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all flex flex-col gap-3 ${isLocked ? 'opacity-70 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'} ${stale ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isExpired ? 'border-red-300 ring-1 ring-red-200' : rmkInfo?.isWarning ? 'border-amber-300 ring-1 ring-amber-200' : isPago ? 'border-emerald-300 ring-1 ring-emerald-200' : 'border-black/5'}`}
+                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all flex flex-col gap-3 ${isLocked ? 'opacity-70 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'} ${stale ? 'border-red-300 ring-1 ring-red-200' : isPago ? 'border-emerald-300 ring-1 ring-emerald-200' : 'border-black/5'}`}
                                 >
                                   {/* Lock badge */}
                                   {isPago && (
@@ -3394,10 +3354,10 @@ export default function App() {
                                         ⚠️ Sem atendimento há {getStaleHours(sale)}h
                                       </span>
                                       <button
-                                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(sale.id, SaleStatus.REMARKETING); }}
-                                        className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-lg hover:bg-amber-100 transition-colors whitespace-nowrap"
+                                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(sale.id, SaleStatus.ARQUIVADO); }}
+                                        className="text-[10px] font-bold text-zinc-600 bg-zinc-100 px-2 py-1 rounded-lg hover:bg-zinc-200 transition-colors whitespace-nowrap"
                                       >
-                                        → Remarketing
+                                        → Arquivar
                                       </button>
                                     </div>
                                   )}
@@ -3407,12 +3367,7 @@ export default function App() {
                                       ❌ {sale.receipt_rejection_reason || 'Comprovante Rejeitado'} — envie novamente
                                     </span>
                                   )}
-                                  {/* Remarketing timer */}
-                                  {rmkInfo && (
-                                    <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-lg w-fit ${rmkInfo.isExpired ? 'text-red-600 bg-red-50 animate-pulse' : rmkInfo.isWarning ? 'text-amber-600 bg-amber-50 animate-pulse' : 'text-emerald-600 bg-emerald-50'}`}>
-                                      ⏱️ {rmkInfo.label}
-                                    </div>
-                                  )}
+
                                   <div className="flex justify-between items-start">
                                     <div>
                                       <p className="font-bold text-zinc-900">{sale.phone}</p>
@@ -3420,12 +3375,7 @@ export default function App() {
                                     </div>
                                     <span className="font-bold text-emerald-600 text-sm">R$ {sale.value.toLocaleString()}</span>
                                   </div>
-                                  {sale.return_date && status === SaleStatus.REMARKETING && (
-                                    <div className="flex items-center gap-1 text-xs font-medium text-amber-600 bg-amber-50 px-2 py-1 rounded-lg w-fit">
-                                      <Calendar className="w-3 h-3" />
-                                      Retorno: {new Date(sale.return_date + 'T00:00:00').toLocaleDateString('pt-BR')}
-                                    </div>
-                                  )}
+
                                   <div className="flex justify-between items-center pt-2 border-t border-black/5">
                                     <span className="text-[10px] text-zinc-400 font-medium">
                                       {new Date(sale.created_at).toLocaleDateString()}
@@ -4772,50 +4722,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Remarketing Modal */}
-      <AnimatePresence>
-        {remarketingSaleId && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-8"
-            >
-              <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Calendar className="w-8 h-8 text-amber-600" />
-              </div>
-              <h3 className="text-xl font-bold text-zinc-900 mb-2 text-center">Mover para Remarketing</h3>
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
-                <p className="text-sm font-bold text-amber-700 mb-1">⏱️ Prazo de 8 horas</p>
-                <p className="text-xs text-amber-600">Você terá até 8 horas para enviar a primeira mensagem a este lead. Um alerta será exibido quando o prazo estiver próximo do fim.</p>
-              </div>
 
-              <div className="flex gap-3">
-                <button 
-                  onClick={() => {
-                    setRemarketingSaleId(null);
-                    setRemarketingDate('');
-                  }}
-                  className="w-full px-6 py-3 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
-                >
-                  Cancelar
-                </button>
-                <button 
-                  onClick={() => {
-                    handleUpdateStatus(remarketingSaleId, SaleStatus.REMARKETING, false, getLocalISODate());
-                    setRemarketingSaleId(null);
-                    setRemarketingDate('');
-                  }}
-                  className="w-full px-6 py-3 rounded-xl font-bold text-white bg-amber-500 hover:bg-amber-600 transition-all"
-                >
-                  Confirmar
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
       {/* Pending Receipt Modal */}
       <AnimatePresence>
@@ -5061,7 +4968,7 @@ export default function App() {
                         required 
                         className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
                       >
-                        {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.CANCELADO).map(s => <option key={s} value={s}>{getStatusLabel(s)}</option>)}
+                        {Object.values(SaleStatus).filter(s => s !== SaleStatus.DELETED && s !== SaleStatus.CANCELADO && s !== SaleStatus.REMARKETING).map(s => <option key={s} value={s}>{getStatusLabel(s)}</option>)}
                       </select>
                     </div>
                   </div>
