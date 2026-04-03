@@ -268,10 +268,7 @@ export default function App() {
   const [remarketingSaleId, setRemarketingSaleId] = useState<string | null>(null);
   const [remarketingDate, setRemarketingDate] = useState<string>('');
   const [deletingSaleId, setDeletingSaleId] = useState<string | null>(null);
-  const [transferringSale, setTransferringSale] = useState<Sale | null>(null);
-  const [transferTargetId, setTransferTargetId] = useState<string>('');
-  const [massTransferringUser, setMassTransferringUser] = useState<UserProfile | null>(null);
-  const [massTransferTargetId, setMassTransferTargetId] = useState<string>('');
+
   const [dateRange, setDateRange] = useState({
     start: getLocalISODate(),
     end: getLocalISODate()
@@ -306,6 +303,7 @@ export default function App() {
   const [paymentDateFrom, setPaymentDateFrom] = useState<string>('');
   const [paymentDateTo, setPaymentDateTo] = useState<string>('');
   const [paymentStatusFilter, setPaymentStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [expandedVendors, setExpandedVendors] = useState<Record<string, boolean>>({});
   const [receiptsLastSeen, setReceiptsLastSeen] = useState<string>(() => localStorage.getItem('receiptsLastSeen') || '');
 
   // Count new receipts since last time the receipts page was viewed
@@ -416,7 +414,7 @@ export default function App() {
     const isAdminOrManager = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR;
     
     let unsubSales: any;
-    let unsubSalesTransferred: any;
+
     let unsubRankingSales: any;
     let unsubReceipts: any;
     let unsubProfiles: any;
@@ -462,18 +460,16 @@ export default function App() {
         setReceipts(receiptsData);
       }, (error) => handleSyncError(error, 'Comprovantes'));
     } else {
-      // For Vendedor, fetch only their sales or sales transferred to them using separate queries
+      // For Vendedor, fetch only their sales using separate queries
       const salesQ1 = query(collection(db, 'sales'), where('vendedor_id', '==', currentUser.id));
-      const salesQ2 = query(collection(db, 'sales'), where('transfer_to', '==', currentUser.id));
       const salesQ3 = query(collection(db, 'sales'), where('status', '==', SaleStatus.PAGO));
       
       // Using refs to fix stale closure bug - prevents data from disappearing when only one listener fires
       const mySalesRef = { current: [] as Sale[] };
-      const transferredSalesRef = { current: [] as Sale[] };
       const rankingSalesRef = { current: [] as Sale[] };
 
       const mergeSales = () => {
-        const merged = [...mySalesRef.current, ...transferredSalesRef.current, ...rankingSalesRef.current];
+        const merged = [...mySalesRef.current, ...rankingSalesRef.current];
         const uniqueSalesMap = new Map<string, Sale>();
         
         merged.forEach(item => {
@@ -496,11 +492,6 @@ export default function App() {
         mySalesRef.current = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
         mergeSales();
       }, (error) => handleSyncError(error, 'Minhas Vendas'));
-
-      unsubSalesTransferred = onSnapshot(salesQ2, (snapshot) => {
-        transferredSalesRef.current = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
-        mergeSales();
-      }, (error) => handleSyncError(error, 'Vendas Transferidas'));
 
       // For ranking, use all PAGO sales - but only listen, don't block on index errors
       unsubRankingSales = onSnapshot(salesQ3, (snapshot) => {
@@ -547,7 +538,6 @@ export default function App() {
 
     return () => {
       if (unsubSales) unsubSales();
-      if (unsubSalesTransferred) unsubSalesTransferred();
       if (unsubRankingSales) unsubRankingSales();
       if (unsubReceipts) unsubReceipts();
       if (unsubProfiles) unsubProfiles();
@@ -636,8 +626,7 @@ export default function App() {
       const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR;
       if (!isAdminOrManager) {
         const isOwner = sale.vendedor_id === currentUser?.id;
-        const isTransferredToMe = sale.transfer_to === currentUser?.id;
-        if (!isOwner && !isTransferredToMe) {
+        if (!isOwner) {
           return false;
         }
       }
@@ -682,17 +671,7 @@ export default function App() {
     };
   }, [sales]);
 
-  // Count remarketing leads due today or overdue
-  const remarketingBadgeCount = useMemo(() => {
-    if (!currentUser) return 0;
-    const today = toLocalDateString(new Date().toISOString());
-    return sales.filter(s => 
-      s.status === SaleStatus.REMARKETING && 
-      s.return_date && 
-      toLocalDateString(s.return_date) <= today &&
-      (currentUser.role === UserRole.ADMIN || s.vendedor_id === currentUser.id)
-    ).length;
-  }, [sales, currentUser]);
+
 
   const expiringContractsCount = useMemo(() => {
     if (!currentUser) return 0;
@@ -803,13 +782,29 @@ export default function App() {
       .filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO)
       .reduce((acc, s) => acc + s.value, 0);
     const activeContracts = filteredForMRR.filter(s => s.sale_type === SaleType.RECORRENTE && s.contract_status === ContractStatus.ATIVO).length;
+    // Count NEW leads = new customers created in this range
+    const newLeadsInRange = customers.filter(c => {
+      const date = toLocalDateString(c.created_at);
+      if (hasDateFilter) {
+        if (start && date < start) return false;
+        if (end && date > end) return false;
+      }
+      // Filter by vendor if applicable
+      if (isAdminOrManager && dashboardVendorFilter) {
+        return dashboardSales.some(s => s.customer_id === c.id);
+      }
+      if (!isAdminOrManager && currentUser) {
+        return dashboardSales.some(s => s.customer_id === c.id);
+      }
+      return true;
+    });
 
     return {
       dailyTotal,
       monthlyTotal,
       mrr,
       activeContracts,
-      dailyCount: createdInRange.length,
+      dailyCount: newLeadsInRange.length,
       statusCounts,
       conversionRate,
       goalProgress: currentUser?.daily_goal ? (dailyTotal / currentUser.daily_goal) * 100 : 0
@@ -854,41 +849,6 @@ export default function App() {
 
   // --- Actions ---
 
-  const handleBackup = async () => {
-    if (!currentUser) return;
-    try {
-      showToast('Gerando backup...', 'info');
-      const salesSnap = await getDocs(collection(db, 'sales'));
-      const profilesSnap = await getDocs(collection(db, 'profiles'));
-      const receiptsSnap = await getDocs(collection(db, 'receipts'));
-      const paymentsSnap = await getDocs(collection(db, 'payments'));
-      const logsSnap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(500)));
-
-      const backup = {
-        exported_at: new Date().toISOString(),
-        exported_by: currentUser.name,
-        data: {
-          sales: salesSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-          profiles: profilesSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-          receipts: receiptsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-          payments: paymentsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-          audit_logs: logsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-        }
-      };
-
-      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `backup_crm_${getLocalISODate()}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      showToast('Backup baixado com sucesso!', 'success');
-      await addLog(currentUser, 'Realizou backup completo do sistema');
-    } catch (error: any) {
-      showToast('Erro ao gerar backup: ' + error.message, 'error');
-    }
-  };
 
   const handleContractAction = async (saleId: string, actionItem: 'pause' | 'resume' | 'cancel' | 'inadimplente' | 'pay') => {
     if (!currentUser) return;
@@ -964,33 +924,7 @@ export default function App() {
     }
   };
 
-  const handleMassTransfer = async () => {
-    if (!massTransferringUser || !massTransferTargetId || !currentUser) return;
-    try {
-      // Find all active contracts/customers where this user is the vendor or transfer target
-      const targetSales = sales.filter(s => 
-        (s.vendedor_id === massTransferringUser.id || s.transfer_to === massTransferringUser.id) &&
-        (s.status !== SaleStatus.CANCELADO && s.status !== SaleStatus.DELETED) &&
-        (s.contract_status !== ContractStatus.CANCELADO)
-      );
-      
-      let count = 0;
-      for (const sale of targetSales) {
-        await updateDoc(doc(db, 'sales', sale.id), {
-          transfer_to: massTransferTargetId,
-          updated_at: new Date().toISOString()
-        });
-        count++;
-      }
-      
-      await addLog(currentUser, `Transferiu em massa ${count} negócios de ${massTransferringUser.name} para novo responsável.`, massTransferringUser.id);
-      showToast(`Transferência de ${count} negócios realizada com sucesso!`, 'success');
-      setMassTransferringUser(null);
-      setMassTransferTargetId('');
-    } catch (error: any) {
-      showToast('Erro na transferência em massa: ' + error.message, 'error');
-    }
-  };
+
 
   const handleAddLead = async (leadData: any) => {
     if (!currentUser) return;
@@ -1304,41 +1238,7 @@ export default function App() {
     }
   };
 
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !currentUser) return;
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const csv = event.target?.result as string;
-      const lines = csv.split('\n');
-      
-      let importedCount = 0;
-      for (let i = 1; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
-        const values = lines[i].split(',');
-        
-        try {
-          await addDoc(collection(db, 'sales'), {
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            vendedor_id: currentUser.id,
-            name: values[2]?.replace(/"/g, '') || 'Cliente Importado',
-            phone: values[3]?.replace(/"/g, '') || '',
-            service: values[4]?.replace(/"/g, '') || '',
-            value: Number(values[5]?.replace(/"/g, '')) || 0,
-            status: SaleStatus.AGUARDANDO
-          });
-          importedCount++;
-        } catch (err) {
-          console.error('Erro ao importar linha', i, err);
-        }
-      }
-      showToast(`${importedCount} leads importados com sucesso!`, 'success');
-      if (e.target) e.target.value = ''; // Reset input
-    };
-    reader.readAsText(file);
-  };
 
   const handleExport = () => {
     const csvContent = [
@@ -1462,65 +1362,7 @@ export default function App() {
     }
   };
 
-  const handleInitiateTransfer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!currentUser || !transferringSale || !transferTargetId) return;
-    setIsSubmitting(true);
-    try {
-      await updateDoc(doc(db, 'sales', transferringSale.id), {
-        transfer_to: transferTargetId,
-        updated_at: new Date().toISOString()
-      });
-      const targetUser = users.find(u => u.id === transferTargetId);
-      await addLog(currentUser, `Solicitou transferência do lead ${transferringSale.name} para ${targetUser?.name}`, transferringSale.id);
-      setTransferringSale(null);
-      setTransferTargetId('');
-    } catch (error: any) {
-      showToast('Erro ao transferir: ' + error.message, 'error');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
 
-  const handleAcceptTransfer = async (sale: Sale) => {
-    if (!currentUser) return;
-    try {
-      await updateDoc(doc(db, 'sales', sale.id), {
-        vendedor_id: currentUser.id,
-        transfer_to: null,
-        updated_at: new Date().toISOString()
-      });
-      await addLog(currentUser, `Aceitou a transferência do lead ${sale.name}`, sale.id);
-    } catch (error: any) {
-      showToast('Erro ao aceitar transferência: ' + error.message, 'error');
-    }
-  };
-
-  const handleRejectTransfer = async (sale: Sale) => {
-    if (!currentUser) return;
-    try {
-      await updateDoc(doc(db, 'sales', sale.id), {
-        transfer_to: null,
-        updated_at: new Date().toISOString()
-      });
-      await addLog(currentUser, `Recusou a transferência do lead ${sale.name}`, sale.id);
-    } catch (error: any) {
-      showToast('Erro ao recusar transferência: ' + error.message, 'error');
-    }
-  };
-
-  const handleCancelTransfer = async (sale: Sale) => {
-    if (!currentUser) return;
-    try {
-      await updateDoc(doc(db, 'sales', sale.id), {
-        transfer_to: null,
-        updated_at: new Date().toISOString()
-      });
-      await addLog(currentUser, `Cancelou a transferência do lead ${sale.name}`, sale.id);
-    } catch (error: any) {
-      showToast('Erro ao cancelar transferência: ' + error.message, 'error');
-    }
-  };
 
   const handleUpdateReceiptStatus = async (receiptId: string, newStatus: ReceiptStatus) => {
     if (!currentUser || currentUser.role === UserRole.VENDEDOR) return;
@@ -2068,13 +1910,13 @@ export default function App() {
     { id: 'sales', label: 'Fluxo de Vendas', icon: FileText, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
     { id: 'customers', label: 'Clientes', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
     { id: 'contracts', label: 'Contratos', icon: Repeat, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR], badge: expiringContractsCount },
-    { id: 'calendar', label: 'Agenda', icon: CalendarDays, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR], badge: remarketingBadgeCount },
+
     { id: 'receipts', label: 'Comprovantes', icon: CheckCircle, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR], badge: newReceiptsCount },
     { id: 'my-payments', label: 'Meus Pagamentos', icon: Wallet, roles: [UserRole.VENDEDOR, UserRole.SUPERVISOR] },
     { id: 'profile', label: 'Meu Perfil', icon: UserIcon, roles: [UserRole.ADMIN, UserRole.VENDEDOR, UserRole.SUPERVISOR] },
     { id: 'users', label: 'Equipe', icon: Users, roles: [UserRole.ADMIN] },
     { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN] },
-    { id: 'data-hub', label: 'Central de Dados', icon: Database, roles: [UserRole.ADMIN] },
+
     { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN] },
     { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR], badge: sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).length },
   ];
@@ -2231,21 +2073,25 @@ export default function App() {
         </header>
 
         {/* Cleanup Reminder Banner (every 15 days) */}
-        {currentUser.role === UserRole.ADMIN && (currentPage === 'dashboard' || currentPage === 'data-hub') && (() => {
+        {currentUser.role === UserRole.ADMIN && currentPage === 'dashboard' && (() => {
           const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
           return daysSince >= 15 ? (
             <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mx-4 mt-2 rounded-md shadow-sm flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Clock className="w-4 h-4 text-amber-600" />
                 <p className="text-sm text-amber-800 font-medium">
-                  🧹 Limpeza de dados pendente {daysSince === 999 ? '(nunca realizada)' : `(${daysSince} dias atrás)`}. Vá em <strong>Central de Dados</strong> para limpar comprovantes e logs antigos.
+                  🧹 Limpeza de dados recomendada {daysSince === 999 ? '(nunca realizada)' : `(${daysSince} dias atrás)`}. Vá em <strong>Logs</strong> para limpar comprovantes e logs antigos.
                 </p>
               </div>
               <button 
-                onClick={() => setCurrentPage('data-hub')}
+                onClick={async () => {
+                  const now = new Date().toISOString();
+                  await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now });
+                  setLastCleanupDate(now);
+                }}
                 className="text-xs font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 px-3 py-1 rounded-lg transition-colors whitespace-nowrap"
               >
-                Ir para Limpeza
+                OK, Entendi
               </button>
             </div>
           ) : null;
@@ -2682,7 +2528,7 @@ export default function App() {
                                 {sales
                                   .filter(s => s.customer_id === customer.id && !KANBAN_HIDDEN_STATUSES.includes(s.status) && s.status !== SaleStatus.DELETED)
                                   .filter(s => {
-                                    if (s.status === SaleStatus.PAGO) return isPagoVisibleInFlow(s);
+                                    if (s.status === SaleStatus.PAGO) return isPagoVisibleInFlow(s) || receipts.some(r => r.sale_id === s.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
                                     if (s.status === SaleStatus.ARQUIVADO) return false;
                                     return true;
                                   })
@@ -3327,7 +3173,7 @@ export default function App() {
                             // Hide CANCELADO and ARQUIVADO from list
                             if (KANBAN_HIDDEN_STATUSES.includes(sale.status as SaleStatus)) return false;
                             // PAGO: only show if paid today
-                            if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale)) return false;
+                            if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale) && !receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'))) return false;
                             return true;
                           }).map((sale) => (
                             <tr key={sale.id} className={`hover:bg-zinc-50 transition-all ${isStaleAguardando(sale as Sale) ? 'bg-red-50/40' : ''}`}>
@@ -3359,7 +3205,7 @@ export default function App() {
                                   <select 
                                     value={sale.status}
                                     onChange={(e) => handleUpdateStatus(sale.id, e.target.value as SaleStatus)}
-                                    disabled={isListLocked || (sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR) || sale.transfer_to !== undefined && sale.transfer_to !== null}
+                                    disabled={isListLocked || (sale.status === SaleStatus.EXCLUSAO_SOLICITADA && currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.SUPERVISOR)}
                                     className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase outline-none cursor-pointer w-fit ${
                                       sale.status === SaleStatus.PAGO ? 'bg-emerald-100 text-emerald-600' :
                                       sale.status === SaleStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
@@ -3406,16 +3252,7 @@ export default function App() {
                                       </span>
                                     );
                                   })()}
-                                  {sale.transfer_to && sale.transfer_to !== currentUser?.id && (
-                                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit">
-                                      Aguardando aceite
-                                    </span>
-                                  )}
-                                  {sale.transfer_to === currentUser?.id && (
-                                    <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full w-fit">
-                                      Transferência recebida
-                                    </span>
-                                  )}
+
                                 </div>
                               </td>
                               <td className="px-6 py-4">
@@ -3450,22 +3287,7 @@ export default function App() {
                                        Comprovante
                                     </button>
                                   )}
-                                  {sale.transfer_to === currentUser?.id ? (
-                                    <>
-                                      <button onClick={() => handleAcceptTransfer(sale)} className="p-2 hover:bg-emerald-50 text-emerald-600 rounded-lg transition-all" title="Aceitar Transferência">
-                                        <CheckCircle className="w-4 h-4" />
-                                      </button>
-                                      <button onClick={() => handleRejectTransfer(sale)} className="p-2 hover:bg-red-50 text-red-600 rounded-lg transition-all" title="Recusar Transferência">
-                                        <XCircle className="w-4 h-4" />
-                                      </button>
-                                    </>
-                                  ) : sale.transfer_to ? (
-                                    <button onClick={() => handleCancelTransfer(sale)} className="p-2 hover:bg-zinc-100 text-zinc-500 rounded-lg transition-all" title="Cancelar Transferência">
-                                      <X className="w-4 h-4" />
-                                    </button>
-                                  ) : (
-                                    <>
-                                      <a 
+                                  <a 
                                         href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
                                         target="_blank"
                                         rel="noopener noreferrer"
@@ -3479,9 +3301,6 @@ export default function App() {
                                           <Edit2 className="w-4 h-4" />
                                         </button>
                                       )}
-                                      <button onClick={() => setTransferringSale(sale)} className="p-2 hover:bg-blue-50 text-blue-600 rounded-lg transition-all" title="Transferir Lead">
-                                        <ArrowRightLeft className="w-4 h-4" />
-                                      </button>
                                       {sale.status === SaleStatus.EXCLUSAO_SOLICITADA && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR) && (
                                         <>
                                           <button 
@@ -3501,8 +3320,6 @@ export default function App() {
                                           </button>
                                         </>
                                       )}
-                                    </>
-                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -3519,7 +3336,7 @@ export default function App() {
                             
                             // PAGO: only show if paid today
                             if (status === SaleStatus.PAGO) {
-                              return isPagoVisibleInFlow(s);
+                              return isPagoVisibleInFlow(s) || receipts.some(r => r.sale_id === s.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
                             }
 
                             // ARQUIVADO: column visible as drop target but sales hidden immediately
@@ -4009,15 +3826,7 @@ export default function App() {
                               >
                                 Excluir
                               </button>
-                              <button 
-                                onClick={() => {
-                                  setMassTransferringUser(user);
-                                  setMassTransferTargetId('');
-                                }}
-                                className="col-span-2 py-2 border border-indigo-200 text-indigo-600 rounded-xl text-xs font-bold hover:bg-indigo-50 transition-all"
-                              >
-                                Transferir Carteira
-                              </button>
+
                             </>
                           )}
                         </div>
@@ -4027,200 +3836,59 @@ export default function App() {
                 </div>
               )}
 
-              {currentPage === 'data-hub' && (currentUser.role === UserRole.ADMIN) && (
-                <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
-                  <div className="p-6 border-b border-black/5">
-                    <h3 className="font-bold text-zinc-900">Central de Dados</h3>
-                    <p className="text-zinc-500 text-sm mt-1">Importe ou exporte todos os leads do sistema.</p>
-                  </div>
-                  <div className="p-6 flex flex-col gap-6">
-                    <div className="bg-amber-50 p-6 rounded-2xl border border-amber-200 flex flex-col gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-amber-100 text-amber-600 rounded-xl flex items-center justify-center">
-                          <Download className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-zinc-900">Backup Completo (JSON)</h4>
-                          <p className="text-sm text-zinc-500">Baixe um backup completo com todas as vendas, usuários, comprovantes, pagamentos e logs.</p>
-                        </div>
-                      </div>
-                      <button 
-                        onClick={handleBackup}
-                        className="w-fit bg-amber-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-amber-700 transition-colors"
-                      >
-                        Baixar Backup
-                      </button>
-                    </div>
-                    <div className="bg-zinc-50 p-6 rounded-2xl border border-black/5 flex flex-col gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
-                          <Upload className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-zinc-900">Importar Leads (CSV)</h4>
-                          <p className="text-sm text-zinc-500">Faça o upload de uma planilha CSV com os leads. Eles serão atribuídos a você.</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <label className="cursor-pointer bg-indigo-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-indigo-700 transition-colors">
-                          Selecionar Arquivo CSV
-                          <input type="file" accept=".csv" className="hidden" onChange={handleImport} />
-                        </label>
-                        <p className="text-xs text-zinc-400">Formato esperado: Data, Vendedor, Nome, WhatsApp, Serviço, Valor, Status</p>
-                      </div>
-                    </div>
 
-                    <div className="bg-zinc-50 p-6 rounded-2xl border border-black/5 flex flex-col gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center">
-                          <Database className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-zinc-900">Exportar Leads (CSV)</h4>
-                          <p className="text-sm text-zinc-500">Baixe uma planilha com todos os leads filtrados atualmente.</p>
-                        </div>
-                      </div>
-                      <button 
-                        onClick={handleExport}
-                        className="w-fit bg-emerald-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-emerald-700 transition-colors"
-                      >
-                        Baixar Planilha
-                      </button>
-                    </div>
-                    <div className="bg-indigo-50 p-6 rounded-2xl border border-indigo-200 flex flex-col gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center">
-                          <Upload className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-zinc-900">Restaurar Backup (JSON)</h4>
-                          <p className="text-sm text-zinc-500">Restaure vendas a partir de um arquivo de backup JSON gerado anteriormente.</p>
-                        </div>
-                      </div>
-                      <div className="relative w-fit">
-                        <input 
-                          type="file" 
-                          accept=".json"
-                          className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                          onChange={async (e) => {
-                            const file = e.target.files?.[0];
-                            if (!file || !currentUser) return;
-                            try {
-                              const text = await file.text();
-                              const data = JSON.parse(text);
-                              let count = 0;
-                              if (data.sales && Array.isArray(data.sales)) {
-                                for (const sale of data.sales) {
-                                  const { id, ...saleData } = sale;
-                                  await addDoc(collection(db, 'sales'), saleData);
-                                  count++;
-                                }
-                              }
-                              await addLog(currentUser, `Restaurou backup com ${count} vendas`);
-                              showToast(`Backup restaurado: ${count} vendas importadas!`, 'success');
-                            } catch (err: any) {
-                              showToast('Erro ao restaurar backup: ' + err.message, 'error');
-                            }
-                            if (e.target) e.target.value = '';
-                          }}
-                        />
-                        <button className="bg-indigo-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-indigo-700 transition-colors pointer-events-none">
-                          Selecionar Arquivo JSON
-                        </button>
-                      </div>
-                    </div>
-                    <div className="bg-red-50 p-6 rounded-2xl border border-red-200 flex flex-col gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-red-100 text-red-600 rounded-xl flex items-center justify-center">
-                          <Trash2 className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <h4 className="font-bold text-zinc-900">Limpeza de Dados Antigos</h4>
-                          <p className="text-sm text-zinc-500">Remova comprovantes e logs com mais de 15 dias para liberar espaço.</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-3 flex-wrap">
-                        <button 
-                          onClick={() => {
-                            const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
-                            const oldReceipts = receipts.filter(r => r.created_at < cutoff);
-                            if (oldReceipts.length === 0) {
-                              const now = new Date().toISOString(); setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now }); setLastCleanupDate(now);
-                              showToast('Nenhum comprovante com mais de 15 dias encontrado.', 'info');
-                              return;
-                            }
-                            setConfirmModal({
-                              title: '🧹 Limpar Comprovantes',
-                              message: `Deseja apagar ${oldReceipts.length} comprovante(s) com mais de 15 dias? Esta ação não pode ser desfeita.`,
-                              confirmText: 'Apagar',
-                              onConfirm: async () => {
-                                try {
-                                  for (const r of oldReceipts) {
-                                    await deleteDoc(doc(db, 'receipts', r.id));
-                                  }
-                                  await addLog(currentUser, `Limpou ${oldReceipts.length} comprovantes antigos (>15 dias)`);
-                                  const nowCleanup = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: nowCleanup }); setLastCleanupDate(nowCleanup);
-                                  showToast(`${oldReceipts.length} comprovante(s) removido(s)!`, 'success');
-                                } catch (err: any) {
-                                  showToast('Erro na limpeza: ' + err.message, 'error');
-                                }
-                              }
-                            });
-                          }}
-                          className="bg-red-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-red-700 transition-colors"
-                        >
-                          Limpar Comprovantes (+15 dias)
-                        </button>
-                        <button 
-                          onClick={() => {
-                            const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
-                            const oldLogs = logs.filter(l => l.created_at < cutoff);
-                            if (oldLogs.length === 0) {
-                              const now2 = new Date().toISOString(); setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now2 }); setLastCleanupDate(now2);
-                              showToast('Nenhum log com mais de 15 dias encontrado.', 'info');
-                              return;
-                            }
-                            setConfirmModal({
-                              title: '🧹 Limpar Logs',
-                              message: `Deseja apagar ${oldLogs.length} log(s) com mais de 15 dias? Esta ação não pode ser desfeita.`,
-                              confirmText: 'Apagar',
-                              onConfirm: async () => {
-                                try {
-                                  for (const l of oldLogs) {
-                                    await deleteDoc(doc(db, 'audit_logs', l.id));
-                                  }
-                                  const now3 = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now3 }); setLastCleanupDate(now3);
-                                  showToast(`${oldLogs.length} log(s) removido(s)!`, 'success');
-                                } catch (err: any) {
-                                  showToast('Erro na limpeza: ' + err.message, 'error');
-                                }
-                              }
-                            });
-                          }}
-                          className="bg-orange-600 text-white px-4 py-2 rounded-xl font-semibold hover:bg-orange-700 transition-colors"
-                        >
-                          Limpar Logs (+15 dias)
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               {currentPage === 'logs' && (currentUser.role === UserRole.ADMIN) && (
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                   <div className="p-6 border-b border-black/5 flex justify-between items-center">
                     <h3 className="font-bold text-zinc-900">Logs de Auditoria</h3>
-                    {(() => {
-                      const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
-                      return daysSince >= 15 ? (
-                        <span className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-full animate-pulse">
-                          ⚠️ Limpeza pendente ({daysSince === 999 ? 'nunca feita' : `${daysSince} dias`})
-                        </span>
-                      ) : (
-                        <span className="text-xs text-zinc-400">Próxima limpeza em {15 - daysSince} dia(s)</span>
-                      );
-                    })()}
+                    <div className="flex items-center gap-3">
+                      <button 
+                        onClick={() => {
+                          const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+                          const oldReceipts = receipts.filter(r => r.created_at < cutoff);
+                          const oldLogs = logs.filter(l => l.created_at < cutoff);
+                          if (oldReceipts.length === 0 && oldLogs.length === 0) {
+                            const now = new Date().toISOString(); setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now }); setLastCleanupDate(now);
+                            showToast('Nenhum dado antigo encontrado. Tudo limpo!', 'info');
+                            return;
+                          }
+                          setConfirmModal({
+                            title: '🧹 Limpeza Geral',
+                            message: `Serão removidos:\n• ${oldReceipts.length} comprovante(s)\n• ${oldLogs.length} log(s)\n\nTodos com mais de 15 dias. Esta ação não pode ser desfeita.`,
+                            confirmText: 'Limpar Tudo',
+                            onConfirm: async () => {
+                              try {
+                                for (const r of oldReceipts) {
+                                  await deleteDoc(doc(db, 'receipts', r.id));
+                                }
+                                for (const l of oldLogs) {
+                                  await deleteDoc(doc(db, 'audit_logs', l.id));
+                                }
+                                await addLog(currentUser, `Limpeza geral: ${oldReceipts.length} comprovantes + ${oldLogs.length} logs removidos`);
+                                const nowCleanup = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: nowCleanup }); setLastCleanupDate(nowCleanup);
+                                showToast(`Limpeza concluída: ${oldReceipts.length} comprovante(s) + ${oldLogs.length} log(s) removidos!`, 'success');
+                              } catch (err: any) {
+                                showToast('Erro na limpeza: ' + err.message, 'error');
+                              }
+                            }
+                          });
+                        }}
+                        className="w-fit bg-red-600 text-white px-3 py-1.5 rounded-xl font-semibold hover:bg-red-700 transition-colors text-xs"
+                      >
+                        🧹 Limpar Dados Antigos (+15 dias)
+                      </button>
+                      {(() => {
+                        const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
+                        return daysSince >= 15 ? (
+                          <span className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-full animate-pulse">
+                            ⚠️ Limpeza pendente ({daysSince === 999 ? 'nunca feita' : `${daysSince} dias`})
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-400">Próxima limpeza em {15 - daysSince} dia(s)</span>
+                        );
+                      })()}
+                    </div>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left">
@@ -4250,20 +3918,6 @@ export default function App() {
               {currentPage === 'financial' && (currentUser.role === UserRole.ADMIN) && (
                 <div className="space-y-8">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div className="flex items-center gap-2 bg-white p-1 rounded-xl shadow-sm border border-black/5">
-                      <button
-                        onClick={() => setFinanceiroTab('pendentes')}
-                        className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${financeiroTab === 'pendentes' ? 'bg-indigo-50 text-indigo-600' : 'text-zinc-500 hover:bg-zinc-50'}`}
-                      >
-                        Pendentes
-                      </button>
-                      <button
-                        onClick={() => setFinanceiroTab('historico')}
-                        className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${financeiroTab === 'historico' ? 'bg-indigo-50 text-indigo-600' : 'text-zinc-500 hover:bg-zinc-50'}`}
-                      >
-                        Histórico
-                      </button>
-                    </div>
                     <div className="flex items-center gap-2 bg-white p-2 rounded-2xl shadow-sm border border-black/5">
                       <Calendar className="w-4 h-4 text-zinc-400 ml-2" />
                       <input 
@@ -4284,73 +3938,137 @@ export default function App() {
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <StatCard title="Total Vendido (Período)" value={`R$ ${sales.filter(s => s.status === SaleStatus.PAGO && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
-                    <StatCard title="Comissões a Pagar (Período)" value={`R$ ${(sales.filter(s => s.status === SaleStatus.PAGO && !s.commission_paid && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => {
+                    <StatCard title="Comissões a Pagar" value={`R$ ${sales.filter(s => s.status === SaleStatus.PAGO && !s.commission_paid).reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
                       return acc + calculateCommission(s, v);
-                    }, 0) || 0).toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
+                    }, 0).toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
                     <StatCard title="Total Pago (Período)" value={`R$ ${payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).reduce((acc, p) => acc + p.amount, 0).toLocaleString()}`} icon={CheckCircle} color="bg-emerald-500" />
                   </div>
 
-                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
-                    <div className="p-6 border-b border-black/5">
-                      <h3 className="font-bold text-zinc-900">
-                        {financeiroTab === 'pendentes' ? 'Controle de Comissões Pendentes' : 'Histórico de Pagamentos'}
-                      </h3>
-                    </div>
-                    <div className="overflow-x-auto">
-                      {financeiroTab === 'pendentes' ? (
-                        <table className="w-full text-left">
-                          <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
-                            <tr>
-                              <th className="px-6 py-4 font-semibold">Vendedor</th>
-                              <th className="px-6 py-4 font-semibold">Total Vendido</th>
-                              <th className="px-6 py-4 font-semibold">Valor Comissão</th>
-                              <th className="px-6 py-4 font-semibold">Ações</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-black/5">
-                            {users.filter(u => u.role === UserRole.VENDEDOR).map(user => {
-                              const sellerSales = sales.filter(s => s.vendedor_id === user.id && s.status === SaleStatus.PAGO && !s.commission_paid && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end));
-                              const total = sellerSales.reduce((acc, s) => acc + s.value, 0);
-                              const commissionVal = sellerSales.reduce((acc, s) => acc + calculateCommission(s, user), 0);
-                              
-                              if (sellerSales.length === 0) return null;
-                              
-                              return (
-                                <tr key={user.id} className="hover:bg-zinc-50 transition-all">
-                                  <td className="px-6 py-4 font-bold text-zinc-900">{user.name}</td>
-                                  <td className="px-6 py-4 text-sm text-zinc-600">R$ {total.toLocaleString()}</td>
-                                  <td className="px-6 py-4 font-bold text-emerald-600">R$ {commissionVal.toLocaleString()}</td>
-                                  <td className="px-6 py-4">
-                                    <button 
+                  {/* Pending Commissions Accordion */}
+                  {(() => {
+                    const pendingSales = sales.filter(s => s.status === SaleStatus.PAGO && !s.commission_paid);
+                    if (pendingSales.length === 0) return null;
+
+                    const grouped = pendingSales.reduce((acc, sale) => {
+                      const vid = sale.vendedor_id;
+                      if (!acc[vid]) acc[vid] = [];
+                      acc[vid].push(sale);
+                      return acc;
+                    }, {} as Record<string, Sale[]>);
+
+                    const grandTotal = pendingSales.reduce((acc, s) => {
+                      const v = users.find(u => u.id === s.vendedor_id);
+                      return acc + calculateCommission(s, v);
+                    }, 0);
+
+                    return (
+                      <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                        <div className="p-6 border-b border-black/5 flex justify-between items-center">
+                          <div>
+                            <h3 className="font-bold text-zinc-900 text-lg">Vendas com Comissão Pendente</h3>
+                            <p className="text-xs text-zinc-400 mt-1">{pendingSales.length} venda(s) • {Object.keys(grouped).length} vendedor(es)</p>
+                          </div>
+                          <span className="px-4 py-2 bg-amber-100 text-amber-700 rounded-full text-sm font-black">
+                            R$ {grandTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="p-4 space-y-3">
+                          {(Object.entries(grouped) as [string, Sale[]][]).map(([vendedorId, vendorSales]) => {
+                            const vendor = users.find(u => u.id === vendedorId);
+                            const vendorTotal = vendorSales.reduce((acc, s) => acc + calculateCommission(s, vendor), 0);
+                            const isExpanded = expandedVendors[vendedorId] || false;
+
+                            return (
+                              <div key={vendedorId} className="border border-black/5 rounded-2xl overflow-hidden">
+                                <div className="flex items-center justify-between p-4 hover:bg-zinc-50 transition-colors">
+                                  <button
+                                    onClick={() => setExpandedVendors(prev => ({ ...prev, [vendedorId]: !prev[vendedorId] }))}
+                                    className="flex items-center gap-3 flex-1"
+                                  >
+                                    <span className={`text-xs font-bold transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▶</span>
+                                    <span className="font-bold text-indigo-600">{vendor?.name || 'Desconhecido'}</span>
+                                    <span className="text-xs text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded-full">{vendorSales.length} venda{vendorSales.length !== 1 ? 's' : ''}</span>
+                                    <span className="font-black text-amber-600 text-sm">R$ {vendorTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                                  </button>
+                                  {vendor && (
+                                    <button
                                       onClick={() => {
-                                        setPayingSeller(user);
-                                        setSelectedSalesToPay(sellerSales.map(s => s.id));
+                                        setPayingSeller(vendor);
+                                        setSelectedSalesToPay(vendorSales.map(s => s.id));
                                         setPaymentReceipt(null);
                                       }}
-                                      disabled={commissionVal === 0}
-                                      className="text-xs font-bold text-indigo-600 hover:underline disabled:opacity-50 disabled:hover:no-underline"
+                                      className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-colors flex items-center gap-1 shrink-0"
                                     >
-                                      Pagar Selecionadas
+                                      <DollarSign className="w-3.5 h-3.5" />
+                                      Pagar
                                     </button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      ) : (
-                        <table className="w-full text-left">
-                          <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                                  )}
+                                </div>
+                                {isExpanded && (
+                                  <div className="border-t border-black/5 max-h-[300px] overflow-y-auto">
+                                    <table className="w-full text-left">
+                                      <thead className="bg-zinc-50 text-zinc-500 text-[10px] uppercase tracking-wider sticky top-0">
+                                        <tr>
+                                          <th className="px-4 py-2 font-semibold">Telefone</th>
+                                          <th className="px-4 py-2 font-semibold">Serviço</th>
+                                          <th className="px-4 py-2 font-semibold">Data Pgto</th>
+                                          <th className="px-4 py-2 font-semibold">Valor</th>
+                                          <th className="px-4 py-2 font-semibold">%</th>
+                                          <th className="px-4 py-2 font-semibold">Comissão</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-zinc-100">
+                                        {vendorSales.map(sale => {
+                                          const rate = vendor?.commissions?.[sale.service] ?? vendor?.commission ?? 10;
+                                          const commission = calculateCommission(sale, vendor);
+                                          return (
+                                            <tr key={sale.id} className="hover:bg-zinc-50 transition-colors text-sm">
+                                              <td className="px-4 py-3 font-medium text-zinc-900">{sale.phone}</td>
+                                              <td className="px-4 py-3">
+                                                <span className="px-2 py-0.5 bg-zinc-100 rounded-full text-xs font-medium text-zinc-600">{sale.service}</span>
+                                              </td>
+                                              <td className="px-4 py-3 text-xs text-zinc-500">{sale.paid_at ? new Date(sale.paid_at).toLocaleDateString('pt-BR') : '—'}</td>
+                                              <td className="px-4 py-3 font-bold text-zinc-900">R$ {sale.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                              <td className="px-4 py-3 text-zinc-500">{rate}%</td>
+                                              <td className="px-4 py-3 font-black text-emerald-600">R$ {commission.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Payment History */}
+                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                    <div className="p-6 border-b border-black/5">
+                      <h3 className="font-bold text-zinc-900 text-lg">Histórico de Pagamentos</h3>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                          <tr>
+                            <th className="px-6 py-4 font-semibold">Data</th>
+                            <th className="px-6 py-4 font-semibold">Vendedor</th>
+                            <th className="px-6 py-4 font-semibold">Valor Pago</th>
+                            <th className="px-6 py-4 font-semibold">Comprovante</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-black/5">
+                          {payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).length === 0 ? (
                             <tr>
-                              <th className="px-6 py-4 font-semibold">Data</th>
-                              <th className="px-6 py-4 font-semibold">Vendedor</th>
-                              <th className="px-6 py-4 font-semibold">Valor Pago</th>
-                              <th className="px-6 py-4 font-semibold">Comprovante</th>
+                              <td colSpan={4} className="px-6 py-8 text-center text-zinc-400">Nenhum pagamento registrado no período.</td>
                             </tr>
-                          </thead>
-                          <tbody className="divide-y divide-black/5">
-                            {payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).map(payment => {
+                          ) : (
+                            payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).map(payment => {
                               const seller = users.find(u => u.id === payment.vendedor_id);
                               return (
                                 <tr key={payment.id} className="hover:bg-zinc-50 transition-all">
@@ -4359,174 +4077,25 @@ export default function App() {
                                   <td className="px-6 py-4 font-bold text-emerald-600">R$ {payment.amount.toLocaleString()}</td>
                                   <td className="px-6 py-4">
                                     {payment.receipt_url ? (
-                                      <a href={payment.receipt_url} target="_blank" rel="noopener noreferrer" className="text-xs font-bold text-indigo-600 hover:underline flex items-center gap-1">
+                                      <button onClick={() => setViewingImageUrl(payment.receipt_url!)} className="text-xs font-bold text-indigo-600 hover:underline flex items-center gap-1">
                                         <FileText className="w-4 h-4" /> Ver Comprovante
-                                      </a>
+                                      </button>
                                     ) : (
                                       <span className="text-xs text-zinc-400">Sem comprovante</span>
                                     )}
                                   </td>
                                 </tr>
                               );
-                            })}
-                          </tbody>
-                        </table>
-                      )}
+                            })
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
                 </div>
               )}
 
-              {currentPage === 'calendar' && (() => {
-                const today = getLocalISODate();
-                const agendaSales = sales
-                  .filter(s => s.status === SaleStatus.REMARKETING && s.return_date && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR || s.vendedor_id === currentUser.id))
-                  .sort((a, b) => new Date(a.return_date!).getTime() - new Date(b.return_date!).getTime());
 
-                const overdue = agendaSales.filter(s => toLocalDateString(s.return_date!) < today);
-                const todayItems = agendaSales.filter(s => toLocalDateString(s.return_date!) === today);
-                const upcoming = agendaSales.filter(s => toLocalDateString(s.return_date!) > today);
-
-                const renderCard = (sale: typeof agendaSales[0]) => {
-                  const returnLocal = toLocalDateString(sale.return_date!);
-                  const returnDate = new Date(sale.return_date! + 'T00:00:00');
-                  const todayDate = new Date(today + 'T00:00:00');
-                  const diffDays = Math.round((returnDate.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
-                  const isOverdue = returnLocal < today;
-                  const isToday = returnLocal === today;
-                  const seller = users.find(u => u.id === sale.vendedor_id);
-                  const rmkInfo = getRemarketingTimeInfo(sale);
-
-                  return (
-                    <div key={sale.id} className={`p-4 rounded-2xl border-2 transition-all hover:shadow-md ${isOverdue ? 'border-red-300 bg-red-50/50' : isToday ? 'border-amber-300 bg-amber-50/30' : 'border-black/5 bg-white'}`}>
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1 space-y-2">
-                          {/* Phone + Value */}
-                          <div className="flex items-center gap-3">
-                            <span className="font-bold text-zinc-900 text-lg">{sale.phone}</span>
-                            <span className="font-black text-emerald-600 text-sm">R$ {sale.value.toLocaleString()}</span>
-                          </div>
-
-                          {/* Service + Vendor */}
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs font-medium text-zinc-500 bg-zinc-100 px-2 py-0.5 rounded-full">{sale.service}</span>
-                            {currentUser.role !== UserRole.VENDEDOR && seller && (
-                              <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{seller.name}</span>
-                            )}
-                          </div>
-
-                          {/* Timer badge */}
-                          <div className="flex items-center gap-2 flex-wrap">
-                            {isOverdue ? (
-                              <span className="text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-lg animate-pulse flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
-                                Atrasado há {Math.abs(diffDays)} dia{Math.abs(diffDays) !== 1 ? 's' : ''}
-                              </span>
-                            ) : isToday ? (
-                              <span className="text-xs font-bold text-amber-600 bg-amber-100 px-2 py-1 rounded-lg animate-pulse flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
-                                Retorno HOJE
-                              </span>
-                            ) : (
-                              <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
-                                Em {diffDays} dia{diffDays !== 1 ? 's' : ''} ({new Date(sale.return_date! + 'T00:00:00').toLocaleDateString('pt-BR')})
-                              </span>
-                            )}
-                            {rmkInfo && (
-                              <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${rmkInfo.isExpired ? 'text-red-600 bg-red-100' : rmkInfo.isWarning ? 'text-amber-600 bg-amber-100' : 'text-zinc-500 bg-zinc-100'}`}>
-                                ⏱️ {rmkInfo.label}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Notes */}
-                          {sale.notes && (
-                            <div className="text-xs text-zinc-500 bg-zinc-50 p-2 rounded-lg border border-zinc-100 mt-1">
-                              📝 {sale.notes}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Actions */}
-                        <div className="flex flex-col gap-2 shrink-0">
-                          <a 
-                            href={`https://wa.me/${sale.phone.replace(/\D/g, '')}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="p-2.5 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-colors"
-                            title="Chamar no WhatsApp"
-                          >
-                            <MessageCircle className="w-5 h-5" />
-                          </a>
-                          <button 
-                            onClick={() => setEditingSale(sale)}
-                            className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors"
-                            title="Editar"
-                          >
-                            <Edit2 className="w-5 h-5" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                };
-
-                return (
-                <div className="space-y-6">
-                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden p-6">
-                    <div className="flex justify-between items-center mb-6">
-                      <h3 className="text-2xl font-bold text-zinc-900">Agenda de Remarketing</h3>
-                      <div className="flex gap-2">
-                        {overdue.length > 0 && (
-                          <span className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-xs font-bold">{overdue.length} atrasado{overdue.length !== 1 ? 's' : ''}</span>
-                        )}
-                        {todayItems.length > 0 && (
-                          <span className="px-3 py-1 bg-amber-100 text-amber-600 rounded-full text-xs font-bold">{todayItems.length} pra hoje</span>
-                        )}
-                        {upcoming.length > 0 && (
-                          <span className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-xs font-bold">{upcoming.length} agendado{upcoming.length !== 1 ? 's' : ''}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {agendaSales.length === 0 ? (
-                      <p className="text-zinc-500 text-center py-8">Nenhum lead agendado para remarketing.</p>
-                    ) : (
-                      <div className="space-y-6">
-                        {/* Overdue */}
-                        {overdue.length > 0 && (
-                          <div>
-                            <h4 className="text-sm font-bold text-red-600 uppercase tracking-wider mb-3 flex items-center gap-2">
-                              🔴 Atrasados
-                            </h4>
-                            <div className="space-y-3">{overdue.map(renderCard)}</div>
-                          </div>
-                        )}
-                        {/* Today */}
-                        {todayItems.length > 0 && (
-                          <div>
-                            <h4 className="text-sm font-bold text-amber-600 uppercase tracking-wider mb-3 flex items-center gap-2">
-                              🟡 Retorno Hoje
-                            </h4>
-                            <div className="space-y-3">{todayItems.map(renderCard)}</div>
-                          </div>
-                        )}
-                        {/* Upcoming */}
-                        {upcoming.length > 0 && (
-                          <div>
-                            <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-wider mb-3 flex items-center gap-2">
-                              🟢 Próximos
-                            </h4>
-                            <div className="space-y-3">{upcoming.map(renderCard)}</div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                );
-              })()}
 
               {currentPage === 'ranking' && (
                 <div className="max-w-4xl mx-auto space-y-8">
@@ -4877,6 +4446,54 @@ export default function App() {
                       <p className="text-xs text-zinc-400 mt-1">de {paidCommissionSales.length + unpaidCommissionSales.length} total</p>
                     </div>
                   </div>
+
+                  {/* Pending Commissions Detail */}
+                  {unpaidCommissionSales.length > 0 && (
+                    <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                      <div className="p-6 border-b border-black/5">
+                        <h3 className="font-bold text-zinc-900 text-lg">Vendas Pendentes de Receber</h3>
+                        <p className="text-xs text-zinc-400 mt-1">Comissões que ainda não foram pagas pelo Admin</p>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                          <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
+                            <tr>
+                              <th className="px-6 py-3 font-semibold">Telefone</th>
+                              <th className="px-6 py-3 font-semibold">Serviço</th>
+                              <th className="px-6 py-3 font-semibold">Valor Venda</th>
+                              <th className="px-6 py-3 font-semibold">% Comissão</th>
+                              <th className="px-6 py-3 font-semibold">Comissão</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-100">
+                            {unpaidCommissionSales.map(sale => {
+                              const rate = currentUser.commissions?.[sale.service] ?? currentUser.commission ?? 10;
+                              const commission = sale.value * rate / 100;
+                              return (
+                                <tr key={sale.id} className="hover:bg-zinc-50 transition-colors">
+                                  <td className="px-6 py-4 font-medium text-zinc-900">{sale.phone}</td>
+                                  <td className="px-6 py-4 text-sm text-zinc-600">
+                                    <span className="px-2 py-0.5 bg-zinc-100 rounded-full text-xs font-medium">{sale.service}</span>
+                                  </td>
+                                  <td className="px-6 py-4 font-bold text-zinc-900">R$ {sale.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                  <td className="px-6 py-4 text-sm text-zinc-500">{rate}%</td>
+                                  <td className="px-6 py-4 font-black text-emerald-600">R$ {commission.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                          <tfoot className="bg-zinc-50 border-t-2 border-zinc-200">
+                            <tr>
+                              <td colSpan={2} className="px-6 py-4 font-bold text-zinc-700 text-sm uppercase">Total</td>
+                              <td className="px-6 py-4 font-bold text-zinc-900">R$ {unpaidCommissionSales.reduce((acc, s) => acc + s.value, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                              <td className="px-6 py-4"></td>
+                              <td className="px-6 py-4 font-black text-emerald-600 text-lg">R$ {pendingAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Payment History */}
                   <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
@@ -5321,63 +4938,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Transfer Modal */}
-      <AnimatePresence>
-        {transferringSale && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-8"
-            >
-              <div className="flex justify-between items-center mb-6">
-                <h3 className="text-xl font-bold text-zinc-900">Transferir Lead</h3>
-                <button onClick={() => { setTransferringSale(null); setTransferTargetId(''); }} className="p-2 hover:bg-zinc-100 rounded-full transition-all">
-                  <X className="w-5 h-5 text-zinc-500" />
-                </button>
-              </div>
-              <form onSubmit={handleInitiateTransfer} className="space-y-6">
-                <div className="space-y-2">
-                  <label className="text-sm font-semibold text-zinc-700">Selecione o Vendedor</label>
-                  <select 
-                    required
-                    value={transferTargetId}
-                    onChange={(e) => setTransferTargetId(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
-                  >
-                    <option value="">Selecione...</option>
-                    {users.filter(u => u.id !== currentUser.id).map(u => (
-                      <option key={u.id} value={u.id}>{u.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex gap-3 pt-4">
-                  <button 
-                    type="button" 
-                    onClick={() => { setTransferringSale(null); setTransferTargetId(''); }}
-                    className="flex-1 px-4 py-3 rounded-xl font-bold text-zinc-600 bg-zinc-100 hover:bg-zinc-200 transition-all"
-                  >
-                    Cancelar
-                  </button>
-                  <button 
-                    type="submit" 
-                    disabled={isSubmitting || !transferTargetId}
-                    className="flex-1 px-4 py-3 rounded-xl font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                        Transferindo...
-                      </>
-                    ) : 'Transferir'}
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+
 
       {/* Delete Confirmation Modal */}
       <AnimatePresence>
@@ -6040,53 +5601,7 @@ export default function App() {
         </div>
       )}
 
-      {massTransferringUser && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-white p-6 rounded-3xl shadow-xl max-w-md w-full border border-black/5 flex flex-col items-center text-center"
-          >
-            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mb-4">
-              <Briefcase className="w-8 h-8 text-indigo-600" />
-            </div>
-            <h3 className="text-xl font-bold text-zinc-900 mb-2">Transferência em Massa</h3>
-            <p className="text-zinc-600 text-sm mb-6">
-              Transfira toda a carteira ativa (vendas pendentes e contratos ativos) de <strong className="text-zinc-900">{massTransferringUser.name}</strong> para outro vendedor.
-            </p>
-            <div className="w-full space-y-4">
-              <div className="text-left w-full">
-                <label className="text-xs font-bold text-zinc-500 uppercase ml-1 mb-1 block">Vendedor Destino</label>
-                <select
-                  value={massTransferTargetId}
-                  onChange={(e) => setMassTransferTargetId(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none"
-                >
-                  <option value="">Selecione para quem transferir...</option>
-                  {users.filter(u => u.id !== massTransferringUser.id && u.status === 'ATIVO').map(u => (
-                    <option key={u.id} value={u.id}>{u.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button 
-                  onClick={() => setMassTransferringUser(null)}
-                  className="flex-1 px-4 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 font-bold rounded-xl transition-all"
-                >
-                  Cancelar
-                </button>
-                <button 
-                  onClick={handleMassTransfer}
-                  disabled={!massTransferTargetId}
-                  className="flex-1 px-4 py-3 bg-indigo-600 disabled:bg-indigo-300 hover:bg-indigo-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-indigo-100 disabled:shadow-none"
-                >
-                  Transferir Tudo
-                </button>
-              </div>
-            </div>
-          </motion.div>
-        </div>
-      )}
+
 
       {duplicateCustomerFound && pendingLeadData && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
