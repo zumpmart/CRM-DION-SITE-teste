@@ -155,7 +155,7 @@ const STATUS_LABELS: Record<string, string> = {
 const getStatusLabel = (status: string) => STATUS_LABELS[status] || status;
 
 // Statuses hidden from Kanban/List columns
-const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING];
+const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING, SaleStatus.ARQUIVADO];
 
 // --- Stale AGUARDANDO detection (>8h) ---
 const STALE_HOURS = 8;
@@ -183,7 +183,8 @@ const isPagoVisibleInFlow = (sale: Sale) => {
 const calculateCommission = (sale: Sale, user?: UserProfile) => {
   if (!user) return 0;
   if (sale.sale_type === SaleType.RECORRENTE) {
-    return (sale.value * (user.recurring_commission || 0)) / 100;
+    const rate = user.recurring_commission || user.commission || 0;
+    return (sale.value * rate) / 100;
   }
   if (user.commissions && user.commissions[sale.service] !== undefined) {
     return user.commissions[sale.service];
@@ -604,7 +605,7 @@ export default function App() {
   const mySales = useMemo(() => {
     return sales.filter(sale => {
       if (sale.status === SaleStatus.DELETED) return false;
-      if (sale.sale_type === SaleType.RECORRENTE) return false;
+      if (sale.sale_type === SaleType.RECORRENTE && !sale.parent_contract_id) return false;
       
       const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR;
       if (!isAdminOrManager) {
@@ -886,15 +887,37 @@ export default function App() {
         case 'pay':
           const saleObj = sales.find(s => s.id === saleId);
           if (saleObj) {
-            const currentNextBilling = new Date(saleObj.next_billing_date || saleObj.contract_start || new Date());
+            const billingPeriod = saleObj.next_billing_date || saleObj.contract_start || new Date().toISOString().split('T')[0];
+            const currentNextBilling = new Date(billingPeriod);
             if (saleObj.billing_cycle === 'trimestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 3);
             else if (saleObj.billing_cycle === 'semestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 6);
             else if (saleObj.billing_cycle === 'anual') currentNextBilling.setFullYear(currentNextBilling.getFullYear() + 1);
             else currentNextBilling.setMonth(currentNextBilling.getMonth() + 1);
             
             updates.next_billing_date = currentNextBilling.toISOString().split('T')[0];
+            updates.last_payment_date = new Date().toISOString();
             updates.contract_status = ContractStatus.ATIVO;
-            logMsg = `Registrou pagamento e renovou ciclo do contrato para ${updates.next_billing_date}`;
+
+            // Create child sale for commission tracking
+            await addDoc(collection(db, 'sales'), {
+              phone: saleObj.phone,
+              name: saleObj.name || '',
+              service: saleObj.service,
+              services: saleObj.services || [saleObj.service],
+              value: saleObj.value,
+              status: SaleStatus.PAGO,
+              paid_at: new Date().toISOString(),
+              sale_type: SaleType.RECORRENTE,
+              vendedor_id: saleObj.vendedor_id,
+              customer_id: saleObj.customer_id,
+              parent_contract_id: saleId,
+              billing_period: billingPeriod,
+              commission_paid: false,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            });
+
+            logMsg = `Registrou pagamento (${billingPeriod}) e renovou ciclo do contrato para ${updates.next_billing_date}`;
           }
           break;
       }
@@ -2586,7 +2609,7 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-black/5 text-sm">
                         {sales
-                          .filter(s => s.sale_type === SaleType.RECORRENTE)
+                          .filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id)
                           .filter(s => 
                             s.phone.includes(searchQuery.replace(/\D/g, '')) || 
                             s.name?.toLowerCase().includes(searchQuery.toLowerCase())
@@ -2595,7 +2618,7 @@ export default function App() {
                           .map(sale => {
                             const isOverdue = new Date() > new Date(`${sale.next_billing_date}T23:59:59`) && sale.contract_status === ContractStatus.ATIVO;
                             return (
-                              <tr key={sale.id} className="hover:bg-zinc-50/50 transition-colors cursor-pointer" onClick={() => setSelectedContract(sale)}>
+                              <tr key={sale.id} className="hover:bg-zinc-50/50 transition-colors">
                                 <td className="p-4">
                                   <div className="font-bold text-zinc-900">{sale.name}</div>
                                   <div className="text-xs text-zinc-500">{sale.phone}</div>
@@ -2621,32 +2644,18 @@ export default function App() {
                                 <td className="p-4 font-medium text-zinc-700">
                                   {sale.next_billing_date ? new Date(`${sale.next_billing_date}T12:00:00`).toLocaleDateString() : '-'}
                                 </td>
-                                <td className="p-4 text-right space-x-2">
-                                  {sale.contract_status !== ContractStatus.ATIVO && sale.contract_status !== ContractStatus.CANCELADO && (
-                                    <button onClick={() => handleContractAction(sale.id, 'resume')} className="p-1 px-2 bg-emerald-50 text-emerald-600 rounded text-xs font-bold hover:bg-emerald-100 transition-colors">
-                                      Retomar
-                                    </button>
-                                  )}
-                                  {sale.contract_status === ContractStatus.ATIVO && (
-                                    <>
-                                      <button onClick={() => handleContractAction(sale.id, 'pay')} className="p-1 px-2 bg-indigo-50 text-indigo-600 rounded text-xs font-bold hover:bg-indigo-100 transition-colors">
-                                        Registrar Pagamento
-                                      </button>
-                                      <button onClick={() => handleContractAction(sale.id, 'inadimplente')} className="p-1 px-2 border border-red-200 text-red-600 rounded text-xs font-bold hover:bg-red-50 transition-colors">
-                                        Inadimplente?
-                                      </button>
-                                    </>
-                                  )}
-                                  {sale.contract_status !== ContractStatus.CANCELADO && (
-                                    <button onClick={() => handleContractAction(sale.id, 'cancel')} className="p-1 px-2 border border-zinc-300 text-zinc-600 rounded text-xs font-bold hover:bg-zinc-100 transition-colors">
-                                      Cancelar
-                                    </button>
-                                  )}
+                                <td className="p-4 text-right">
+                                  <button 
+                                    onClick={() => setSelectedContract(sale)}
+                                    className="px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-xs font-bold hover:bg-indigo-100 transition-colors"
+                                  >
+                                    📋 Ver Contrato
+                                  </button>
                                 </td>
                               </tr>
                             );
                         })}
-                        {sales.filter(s => s.sale_type === SaleType.RECORRENTE).length === 0 && (
+                        {sales.filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id).length === 0 && (
                           <tr>
                             <td colSpan={5} className="p-8 text-center text-zinc-500">
                               Nenhum contrato recorrente registrado.
@@ -2850,7 +2859,7 @@ export default function App() {
                         name: newLeadSaleType === SaleType.RECORRENTE ? formData.get('name') : '',
                         services: newLeadServices,
                         service: newLeadServices[0],
-                        value: Number(formData.get('value')),
+                        value: Math.round(Number(formData.get('value')) * 100) / 100,
                         notes: formData.get('notes') || '',
                         created_at: formData.get('date') ? new Date(`${formData.get('date')}T12:00:00`).toISOString() : new Date().toISOString(),
                         status: SaleStatus.AGUARDANDO,
@@ -3357,6 +3366,11 @@ export default function App() {
                                       <Lock className="w-3 h-3" /> Venda finalizada ✅
                                     </span>
                                   )}
+                                  {isListPago && receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate' || r.audit_status === 'pending' || !r.audit_status)) && (
+                                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit flex items-center gap-1 animate-pulse">
+                                      ⏳ Comprovante aguardando aprovação
+                                    </span>
+                                  )}
                                   {isReceiptListLocked && !isListPago && (
                                     <span className="text-[10px] font-bold text-zinc-500 bg-zinc-100 px-2 py-0.5 rounded-full w-fit flex items-center gap-1">
                                       <Lock className="w-3 h-3" /> Aguardando análise
@@ -3492,6 +3506,11 @@ export default function App() {
                                     <div className="flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg w-fit">
                                       <Lock className="w-3 h-3" />
                                       Venda finalizada ✅
+                                    </div>
+                                  )}
+                                  {isPago && receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate' || r.audit_status === 'pending' || !r.audit_status)) && (
+                                    <div className="flex items-center gap-1 text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-lg w-fit animate-pulse">
+                                      ⏳ Comprovante aguardando aprovação
                                     </div>
                                   )}
                                   {isReceiptLocked && !isPago && (
@@ -4515,8 +4534,7 @@ export default function App() {
                 const paidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && s.commission_paid && s.status === SaleStatus.PAGO);
                 const unpaidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && !s.commission_paid && s.status === SaleStatus.PAGO);
                 const pendingAmount = unpaidCommissionSales.reduce((sum, s) => {
-                  const rate = currentUser.commissions?.[s.service] ?? currentUser.commission ?? 10;
-                  return sum + (s.value * rate / 100);
+                  return sum + calculateCommission(s, currentUser);
                 }, 0);
 
                 return (
@@ -4552,7 +4570,8 @@ export default function App() {
                       <div className="overflow-x-auto">
                         <table className="w-full text-left">
                           <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
-                            <tr>
+                             <tr>
+                              <th className="px-6 py-3 font-semibold">Data Pgto</th>
                               <th className="px-6 py-3 font-semibold">Telefone</th>
                               <th className="px-6 py-3 font-semibold">Serviço</th>
                               <th className="px-6 py-3 font-semibold">Valor Venda</th>
@@ -4562,10 +4581,13 @@ export default function App() {
                           </thead>
                           <tbody className="divide-y divide-zinc-100">
                             {unpaidCommissionSales.map(sale => {
-                              const rate = currentUser.commissions?.[sale.service] ?? currentUser.commission ?? 10;
-                              const commission = sale.value * rate / 100;
+                              const commission = calculateCommission(sale, currentUser);
+                              const rate = sale.sale_type === SaleType.RECORRENTE 
+                                ? (currentUser.recurring_commission || currentUser.commission || 0)
+                                : (currentUser.commissions?.[sale.service] !== undefined ? 'fixa' : (currentUser.commission ?? 10));
                               return (
                                 <tr key={sale.id} className="hover:bg-zinc-50 transition-colors">
+                                  <td className="px-6 py-4 text-sm text-zinc-500">{sale.paid_at ? new Date(sale.paid_at).toLocaleDateString('pt-BR') : '—'}</td>
                                   <td className="px-6 py-4 font-medium text-zinc-900">{sale.phone}</td>
                                   <td className="px-6 py-4 text-sm text-zinc-600">
                                     <span className="px-2 py-0.5 bg-zinc-100 rounded-full text-xs font-medium">{sale.service}</span>
@@ -4579,7 +4601,7 @@ export default function App() {
                           </tbody>
                           <tfoot className="bg-zinc-50 border-t-2 border-zinc-200">
                             <tr>
-                              <td colSpan={2} className="px-6 py-4 font-bold text-zinc-700 text-sm uppercase">Total</td>
+                              <td colSpan={3} className="px-6 py-4 font-bold text-zinc-700 text-sm uppercase">Total</td>
                               <td className="px-6 py-4 font-bold text-zinc-900">R$ {unpaidCommissionSales.reduce((acc, s) => acc + s.value, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
                               <td className="px-6 py-4"></td>
                               <td className="px-6 py-4 font-black text-emerald-600 text-lg">R$ {pendingAmount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
@@ -5317,7 +5339,7 @@ export default function App() {
                   recurring_commission: Number(formData.get('recurring_commission')),
                   commissions,
                   pix_key: formData.get('pix_key') as string,
-                  role: formData.get('role') as UserRole
+                  role: (formData.get('role') as UserRole) || editingSeller.role
                 });
                 setEditingSeller(null);
               }} className="p-8 space-y-6 max-h-[80vh] overflow-y-auto">
@@ -5340,10 +5362,14 @@ export default function App() {
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-semibold text-zinc-700">Cargo</label>
-                    <select name="role" defaultValue={editingSeller.role} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none bg-white">
+                    <select name="role" defaultValue={editingSeller.role} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none bg-white" disabled={editingSeller.id === currentUser?.id && editingSeller.role === UserRole.ADMIN}>
                       <option value={UserRole.VENDEDOR}>Vendedor</option>
                       <option value={UserRole.SUPERVISOR}>Supervisor</option>
-                                          </select>
+                      <option value={UserRole.ADMIN}>Administrador</option>
+                    </select>
+                    {editingSeller.id === currentUser?.id && editingSeller.role === UserRole.ADMIN && (
+                      <p className="text-xs text-zinc-400">Não é possível alterar seu próprio cargo de Admin.</p>
+                    )}
                   </div>
                   
                   <div className="md:col-span-2 pt-4 border-t border-black/5">

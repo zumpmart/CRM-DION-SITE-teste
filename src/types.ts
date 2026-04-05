@@ -84,7 +84,9 @@ export interface Sale {
   contract_end?: string;
   next_billing_date?: string;
   contract_status?: ContractStatus;
-  //
+  last_payment_date?: string;
+  parent_contract_id?: string;
+  billing_period?: string;
   transfer_to?: string | null;
   return_date?: string;
   created_at: string;
