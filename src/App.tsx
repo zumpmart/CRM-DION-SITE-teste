@@ -155,7 +155,7 @@ const STATUS_LABELS: Record<string, string> = {
 const getStatusLabel = (status: string) => STATUS_LABELS[status] || status;
 
 // Statuses hidden from Kanban/List columns
-const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING, SaleStatus.ARQUIVADO];
+const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING];
 
 // --- Stale AGUARDANDO detection (>8h) ---
 const STALE_HOURS = 8;
@@ -655,6 +655,13 @@ export default function App() {
     };
   }, [sales]);
 
+  // Helper: PAGO sale only counts in revenue if receipt is approved or no receipt exists
+  const isSaleRevenueApproved = useCallback((sale: Sale) => {
+    if (sale.status !== SaleStatus.PAGO) return false;
+    const saleReceipts = receipts.filter(r => r.sale_id === sale.id);
+    if (saleReceipts.length === 0) return true; // no receipt = cash, counts
+    return saleReceipts.some(r => r.audit_status === 'approved');
+  }, [receipts]);
 
 
   const expiringContractsCount = useMemo(() => {
@@ -686,7 +693,7 @@ export default function App() {
     const stats = users
       .map(u => {
         const userSales = sales.filter(s => {
-          if (s.vendedor_id !== u.id || s.status !== SaleStatus.PAGO) return false;
+          if (s.vendedor_id !== u.id || !isSaleRevenueApproved(s)) return false;
           const paidRef = s.paid_at || s.updated_at;
           if (!paidRef) return false;
           const paidDate = toLocalDateString(paidRef);
@@ -711,7 +718,7 @@ export default function App() {
       .filter(u => u.count > 0 || true) // Always show all users in ranking
       .sort((a, b) => b.total - a.total);
     return stats;
-  }, [sales, users, rankingFilter]);
+  }, [sales, users, rankingFilter, isSaleRevenueApproved]);
 
   const stats = useMemo(() => {
     const start = dateRange.start;
@@ -734,7 +741,7 @@ export default function App() {
     
     // Revenue from sales PAID in this range (or all if no filter)
     const paidInRange = dashboardSales.filter(s => {
-      if (s.status !== SaleStatus.PAGO) return false;
+      if (!isSaleRevenueApproved(s)) return false;
       const paidRef = s.paid_at || s.updated_at;
       if (!paidRef) return false;
       if (!hasDateFilter) return true;
@@ -747,7 +754,7 @@ export default function App() {
     const dailyTotal = paidInRange.reduce((acc, s) => acc + s.value, 0);
     const targetMonth = (start || getLocalISODate()).substring(0, 7);
     const monthlyTotal = dashboardSales
-      .filter(s => s.status === SaleStatus.PAGO && toLocalDateString(s.paid_at || s.updated_at).startsWith(targetMonth))
+      .filter(s => isSaleRevenueApproved(s) && toLocalDateString(s.paid_at || s.updated_at).startsWith(targetMonth))
       .reduce((acc, s) => acc + s.value, 0);
 
     const statusCounts = {
@@ -887,7 +894,14 @@ export default function App() {
         case 'pay':
           const saleObj = sales.find(s => s.id === saleId);
           if (saleObj) {
-            const billingPeriod = saleObj.next_billing_date || saleObj.contract_start || new Date().toISOString().split('T')[0];
+            // Guard: prevent double payment
+            const nextBilling = saleObj.next_billing_date || saleObj.contract_start;
+            if (nextBilling && new Date(`${nextBilling}T23:59:59`) > new Date()) {
+              showToast('Este período já foi pago. Aguarde o próximo vencimento.', 'warning');
+              return;
+            }
+
+            const billingPeriod = nextBilling || new Date().toISOString().split('T')[0];
             const currentNextBilling = new Date(billingPeriod);
             if (saleObj.billing_cycle === 'trimestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 3);
             else if (saleObj.billing_cycle === 'semestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 6);
@@ -2804,14 +2818,22 @@ export default function App() {
                           >
                             <Edit2 className="w-4 h-4" /> Editar
                           </button>
-                          {contract.contract_status === ContractStatus.ATIVO && (
-                            <button 
-                              onClick={() => { handleContractAction(contract.id, 'pay'); setSelectedContract(null); }}
-                              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold hover:bg-emerald-100 transition-colors"
-                            >
-                              <CheckCircle className="w-4 h-4" /> Confirmar Pagamento
-                            </button>
-                          )}
+                          {contract.contract_status === ContractStatus.ATIVO && (() => {
+                            const nextBill = contract.next_billing_date || contract.contract_start;
+                            const isPeriodPaid = nextBill && new Date(`${nextBill}T23:59:59`) > new Date();
+                            return isPeriodPaid ? (
+                              <span className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold">
+                                <CheckCircle className="w-4 h-4" /> Pago até {new Date(`${nextBill}T12:00:00`).toLocaleDateString('pt-BR')}
+                              </span>
+                            ) : (
+                              <button 
+                                onClick={() => { handleContractAction(contract.id, 'pay'); setSelectedContract(null); }}
+                                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold hover:bg-emerald-100 transition-colors"
+                              >
+                                <CheckCircle className="w-4 h-4" /> Confirmar Pagamento
+                              </button>
+                            );
+                          })()}
                           {contract.contract_status === ContractStatus.ATIVO && (
                             <button 
                               onClick={() => { handleContractAction(contract.id, 'pause'); setSelectedContract(null); }}
@@ -3303,6 +3325,7 @@ export default function App() {
                           {mySales.filter(sale => {
                             // Hide CANCELADO and ARQUIVADO from list
                             if (KANBAN_HIDDEN_STATUSES.includes(sale.status as SaleStatus)) return false;
+                            if (sale.status === SaleStatus.ARQUIVADO) return false;
                             // PAGO: only show if paid today
                             if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale) && !receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'))) return false;
                             return true;
@@ -3694,6 +3717,7 @@ export default function App() {
                           <tr>
                             <th className="px-4 py-3 font-semibold">Data</th>
                             <th className="px-4 py-3 font-semibold">Vendedor</th>
+                            <th className="px-4 py-3 font-semibold">Serviço</th>
                             <th className="px-4 py-3 font-semibold">Arquivo</th>
                             <th className="px-4 py-3 font-semibold">Valor Confirmado</th>
                             <th className="px-4 py-3 font-semibold">Valor OCR</th>
@@ -3716,6 +3740,15 @@ export default function App() {
                             }`}>
                               <td className="px-4 py-3 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleDateString()}</td>
                               <td className="px-4 py-3 text-sm font-medium text-zinc-900">{users.find(u => u.id === receipt.vendedor_id)?.name}</td>
+                              <td className="px-4 py-3 text-sm">
+                                {(() => {
+                                  const sale = sales.find(s => s.id === receipt.sale_id);
+                                  const services = sale?.services || (sale?.service ? [sale.service] : []);
+                                  return services.length > 0 ? (
+                                    <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-full text-xs font-semibold">{services.join(', ')}</span>
+                                  ) : <span className="text-zinc-400 text-xs">—</span>;
+                                })()}
+                              </td>
                               <td className="px-4 py-3 text-sm">
                                 <button 
                                   onClick={() => handleViewReceipt(receipt.file_path)} 
@@ -4051,8 +4084,8 @@ export default function App() {
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <StatCard title="Total Vendido (Período)" value={`R$ ${sales.filter(s => s.status === SaleStatus.PAGO && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
-                    <StatCard title="Comissões a Pagar" value={`R$ ${sales.filter(s => s.status === SaleStatus.PAGO && !s.commission_paid).reduce((acc, s) => {
+                    <StatCard title="Total Vendido (Período)" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
+                    <StatCard title="Comissões a Pagar" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && !s.commission_paid).reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
                       return acc + calculateCommission(s, v);
                     }, 0).toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
@@ -4061,7 +4094,7 @@ export default function App() {
 
                   {/* Pending Commissions Accordion */}
                   {(() => {
-                    const pendingSales = sales.filter(s => s.status === SaleStatus.PAGO && !s.commission_paid);
+                    const pendingSales = sales.filter(s => isSaleRevenueApproved(s) && !s.commission_paid);
                     if (pendingSales.length === 0) return null;
 
                     const grouped = pendingSales.reduce((acc, sale) => {
@@ -4531,8 +4564,8 @@ export default function App() {
                   return true;
                 }).sort((a, b) => b.created_at.localeCompare(a.created_at));
                 const totalReceived = myPayments.filter(p => p.status === 'paid').reduce((sum, p) => sum + p.amount, 0);
-                const paidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && s.commission_paid && s.status === SaleStatus.PAGO);
-                const unpaidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && !s.commission_paid && s.status === SaleStatus.PAGO);
+                const paidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && s.commission_paid && isSaleRevenueApproved(s));
+                const unpaidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && !s.commission_paid && isSaleRevenueApproved(s));
                 const pendingAmount = unpaidCommissionSales.reduce((sum, s) => {
                   return sum + calculateCommission(s, currentUser);
                 }, 0);
