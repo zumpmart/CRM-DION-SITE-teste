@@ -549,6 +549,17 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
+  // Block scroll wheel on number inputs
+  useEffect(() => {
+    const handler = (e: WheelEvent) => {
+      if ((e.target as HTMLElement)?.matches('input[type="number"]')) {
+        (e.target as HTMLElement).blur();
+      }
+    };
+    document.addEventListener('wheel', handler, { passive: true });
+    return () => document.removeEventListener('wheel', handler);
+  }, []);
+
   // Cleanup date listener (Firestore-persisted)
   useEffect(() => {
     if (!currentUser) return;

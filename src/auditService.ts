@@ -1,16 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
 import { Receipt } from './types';
-
-// Initialize Gemini client
-const getGenAI = () => {
-  // Vite replaces process.env.GEMINI_API_KEY with the literal value at build time
-  const apiKey = process.env.GEMINI_API_KEY || '';
-  if (!apiKey) {
-    console.warn('GEMINI_API_KEY não configurada. Auditoria OCR desabilitada.');
-    return null;
-  }
-  return new GoogleGenAI({ apiKey });
-};
 
 export interface OcrResult {
   value: number | null;
@@ -47,14 +35,9 @@ export function generateImageHash(base64Data: string): string {
 }
 
 /**
- * Extract value and date from a receipt image using Gemini OCR
+ * Extract value and date from a receipt image using Gemini OCR via serverless function
  */
 export async function extractFromReceipt(base64Image: string): Promise<OcrResult> {
-  const genai = getGenAI();
-  if (!genai) {
-    return { value: null, date: null, rawText: 'API key não configurada' };
-  }
-
   try {
     // Extract mime type and base64 data
     const mimeMatch = base64Image.match(/^data:(.*?);base64,/);
@@ -62,20 +45,7 @@ export async function extractFromReceipt(base64Image: string): Promise<OcrResult
     const dataStart = base64Image.indexOf(',');
     const base64Data = dataStart >= 0 ? base64Image.substring(dataStart + 1) : base64Image;
 
-    const response = await genai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType,
-                data: base64Data,
-              },
-            },
-            {
-              text: `Analise este comprovante de pagamento e extraia APENAS as seguintes informações. Responda SOMENTE no formato JSON abaixo, sem nenhum texto adicional:
+    const prompt = `Analise este comprovante de pagamento e extraia APENAS as seguintes informações. Responda SOMENTE no formato JSON abaixo, sem nenhum texto adicional:
 
 {
   "valor": 0.00,
@@ -88,15 +58,21 @@ Regras:
 - Se não conseguir identificar o valor, use null
 - Se não conseguir identificar a data, use null
 - Considere o valor principal da transação (não taxas ou descontos)
-- Para comprovantes PIX, o valor é o "Valor" ou "Valor da transferência"`,
-            },
-          ],
-        },
-      ],
+- Para comprovantes PIX, o valor é o "Valor" ou "Valor da transferência"`;
+
+    const response = await fetch('/api/gemini', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base64Data, mimeType, prompt }),
     });
 
-    const text = response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    
+    if (!response.ok) {
+      const err = await response.json();
+      return { value: null, date: null, rawText: err.error || 'Erro no servidor' };
+    }
+
+    const { text } = await response.json();
+
     // Parse JSON response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
@@ -110,7 +86,7 @@ Regras:
 
     return { value: null, date: null, rawText: text };
   } catch (error: any) {
-    console.error('Erro no OCR Gemini:', error);
+    console.error('Erro no OCR:', error);
     return { value: null, date: null, rawText: `Erro: ${error.message}` };
   }
 }
