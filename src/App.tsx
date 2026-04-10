@@ -4175,19 +4175,29 @@ export default function App() {
                               </button>
                               <button 
                                 onClick={() => {
-                                  setConfirmInput('');
                                   setConfirmModal({
-                                    title: 'Excluir Usuário',
-                                    message: 'ATENÇÃO: Excluir este usuário fará com que todas as vendas dele fiquem sem dono (Desconhecido). Recomendamos DESATIVAR o usuário em vez de excluir. Tem certeza absoluta que deseja EXCLUIR?',
-                                    confirmText: 'Excluir',
-                                    onConfirm: async () => {
-                                      try {
-                                        await deleteDoc(doc(db, 'profiles', user.id));
-                                        await addLog(currentUser, `Excluiu permanentemente o usuário ${user.name}`, user.id);
-                                        showToast('Usuário excluído com sucesso.', 'success');
-                                      } catch (err: any) {
-                                        showToast('Erro ao excluir usuário: ' + err.message, 'error');
-                                      }
+                                    title: '⚠️ Excluir Usuário',
+                                    message: `Tem certeza que deseja excluir "${user.name}"? Todas as vendas dele ficarão sem dono. Recomendamos DESATIVAR em vez de excluir.`,
+                                    confirmText: 'Continuar',
+                                    cancelText: 'Cancelar',
+                                    onConfirm: () => {
+                                      setConfirmInput('');
+                                      setConfirmModal({
+                                        title: '🚨 Confirmação Final',
+                                        message: `Para excluir "${user.name}" permanentemente, digite EXCLUIR abaixo.`,
+                                        requireInput: 'EXCLUIR',
+                                        confirmText: 'Excluir Permanentemente',
+                                        cancelText: 'Cancelar',
+                                        onConfirm: async () => {
+                                          try {
+                                            await deleteDoc(doc(db, 'profiles', user.id));
+                                            await addLog(currentUser, `Excluiu permanentemente o usuário ${user.name}`, user.id);
+                                            showToast(`"${user.name}" excluído com sucesso.`, 'success');
+                                          } catch (err: any) {
+                                            showToast('Erro ao excluir usuário: ' + err.message, 'error');
+                                          }
+                                        }
+                                      });
                                     }
                                   });
                                 }}
