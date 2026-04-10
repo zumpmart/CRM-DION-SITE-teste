@@ -4193,41 +4193,63 @@ export default function App() {
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                   <div className="p-6 border-b border-black/5 flex justify-between items-center">
                     <h3 className="font-bold text-zinc-900">Logs de Auditoria</h3>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <button 
+                        onClick={() => {
+                          if (logs.length === 0) {
+                            showToast('Nenhum log para apagar.', 'info');
+                            return;
+                          }
+                          setConfirmModal({
+                            title: '🗑️ Limpar Logs',
+                            message: `Apagar TODOS os ${logs.length} log(s) de auditoria? Esta ação não pode ser desfeita.`,
+                            confirmText: 'Apagar Logs',
+                            onConfirm: async () => {
+                              try {
+                                const logsSnap = await getDocs(collection(db, 'audit_logs'));
+                                for (const d of logsSnap.docs) await deleteDoc(doc(db, 'audit_logs', d.id));
+                                showToast(`${logsSnap.size} log(s) apagados!`, 'success');
+                              } catch (err: any) {
+                                showToast('Erro: ' + err.message, 'error');
+                              }
+                            }
+                          });
+                        }}
+                        className="w-fit bg-zinc-700 text-white px-3 py-1.5 rounded-xl font-semibold hover:bg-zinc-800 transition-colors text-xs"
+                      >
+                        🗑️ Limpar Todos os Logs
+                      </button>
                       <button 
                         onClick={() => {
                           const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
                           const oldReceipts = receipts.filter(r => r.created_at < cutoff);
-                          const oldLogs = logs.filter(l => l.created_at < cutoff);
-                          if (oldReceipts.length === 0 && oldLogs.length === 0) {
-                            const now = new Date().toISOString(); setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now }); setLastCleanupDate(now);
-                            showToast('Nenhum dado antigo encontrado. Tudo limpo!', 'info');
+                          if (oldReceipts.length === 0) {
+                            showToast('Nenhum comprovante com +15 dias.', 'info');
                             return;
                           }
                           setConfirmModal({
-                            title: '🧹 Limpeza Geral',
-                            message: `Serão removidos:\n• ${oldReceipts.length} comprovante(s)\n• ${oldLogs.length} log(s)\n\nTodos com mais de 15 dias. Esta ação não pode ser desfeita.`,
-                            confirmText: 'Limpar Tudo',
+                            title: '🧹 Limpar Comprovantes Antigos',
+                            message: `Apagar ${oldReceipts.length} comprovante(s) com mais de 15 dias? Esta ação não pode ser desfeita.`,
+                            confirmText: 'Apagar Comprovantes',
                             onConfirm: async () => {
                               try {
                                 for (const r of oldReceipts) {
                                   await deleteDoc(doc(db, 'receipts', r.id));
                                 }
-                                for (const l of oldLogs) {
-                                  await deleteDoc(doc(db, 'audit_logs', l.id));
-                                }
-                                await addLog(currentUser, `Limpeza geral: ${oldReceipts.length} comprovantes + ${oldLogs.length} logs removidos`);
-                                const nowCleanup = new Date().toISOString(); await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: nowCleanup }); setLastCleanupDate(nowCleanup);
-                                showToast(`Limpeza concluída: ${oldReceipts.length} comprovante(s) + ${oldLogs.length} log(s) removidos!`, 'success');
+                                const now = new Date().toISOString();
+                                await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now });
+                                setLastCleanupDate(now);
+                                await addLog(currentUser, `Limpou ${oldReceipts.length} comprovante(s) antigos (+15 dias)`);
+                                showToast(`${oldReceipts.length} comprovante(s) antigos removidos!`, 'success');
                               } catch (err: any) {
-                                showToast('Erro na limpeza: ' + err.message, 'error');
+                                showToast('Erro: ' + err.message, 'error');
                               }
                             }
                           });
                         }}
                         className="w-fit bg-red-600 text-white px-3 py-1.5 rounded-xl font-semibold hover:bg-red-700 transition-colors text-xs"
                       >
-                        🧹 Limpar Dados Antigos (+15 dias)
+                        🧹 Limpar Comprovantes +15 dias
                       </button>
                       {(() => {
                         const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
