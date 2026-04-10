@@ -1500,19 +1500,31 @@ export default function App() {
   };
 
   const handleDeleteUser = async (userId: string) => {
+    const userName = users.find(u => u.id === userId)?.name || userId;
     setConfirmModal({
       title: '⚠️ Excluir Usuário',
-      message: 'Tem certeza que deseja excluir este usuário permanentemente? Esta ação não pode ser desfeita e pode afetar o histórico de vendas.',
-      confirmText: 'Excluir Permanentemente',
-      onConfirm: async () => {
-        try {
-          await deleteDoc(doc(db, 'profiles', userId));
-          await addLog(currentUser, `Excluiu o usuário ${userId}`, userId);
-          showToast('Usuário excluído com sucesso!', 'success');
-        } catch (error) {
-          console.error('Erro ao excluir usuário:', error);
-          showToast('Erro ao excluir usuário. Verifique suas permissões.', 'error');
-        }
+      message: `Tem certeza que deseja excluir "${userName}"? Esta ação não pode ser desfeita e pode afetar o histórico de vendas.`,
+      confirmText: 'Continuar',
+      cancelText: 'Cancelar',
+      onConfirm: () => {
+        setConfirmInput('');
+        setConfirmModal({
+          title: '🚨 Confirmação Final',
+          message: `Para excluir "${userName}" permanentemente, digite EXCLUIR abaixo.`,
+          requireInput: 'EXCLUIR',
+          confirmText: 'Excluir Permanentemente',
+          cancelText: 'Cancelar',
+          onConfirm: async () => {
+            try {
+              await deleteDoc(doc(db, 'profiles', userId));
+              await addLog(currentUser, `Excluiu o usuário ${userName} (${userId})`, userId);
+              showToast(`"${userName}" excluído com sucesso!`, 'success');
+            } catch (error) {
+              console.error('Erro ao excluir usuário:', error);
+              showToast('Erro ao excluir usuário. Verifique suas permissões.', 'error');
+            }
+          }
+        });
       }
     });
   };
