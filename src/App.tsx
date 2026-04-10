@@ -1535,7 +1535,10 @@ export default function App() {
           const logsSnap = await getDocs(collection(db, 'audit_logs'));
           for (const d of logsSnap.docs) await deleteDoc(doc(db, 'audit_logs', d.id));
 
-          await addLog(currentUser, 'Resetou o banco de dados (apagou vendas, comprovantes, pagamentos e logs)', currentUser.id);
+          const customersSnap = await getDocs(collection(db, 'customers'));
+          for (const d of customersSnap.docs) await deleteDoc(doc(db, 'customers', d.id));
+
+          await addLog(currentUser, 'Resetou o banco de dados (apagou vendas, comprovantes, pagamentos, clientes e logs)', currentUser.id);
           showToast('Banco de dados limpo com sucesso!', 'success');
         } catch (error: any) {
           console.error('Erro ao limpar banco de dados:', error);
