@@ -53,7 +53,7 @@ import { UserProfile, UserRole, Sale, SaleStatus, SaleType, ContractStatus, Cust
 import { auditReceipt, generateImageHash } from './auditService';
 import { db, auth, storage, firebaseConfig } from './firebase';
 import { initializeApp } from 'firebase/app';
-import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, limit, or } from 'firebase/firestore';
+import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, deleteField, query, where, orderBy, onSnapshot, limit, or } from 'firebase/firestore';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, updatePassword, EmailAuthProvider, reauthenticateWithCredential, getAuth as getSecondaryAuth } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
@@ -128,10 +128,8 @@ const ProgressBar = ({ progress, label, current, target }: any) => (
 
 const getLocalISODate = (date?: Date) => {
   const d = date || new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  const parts = d.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }).split('-');
+  return `${parts[0]}-${parts[1]}-${parts[2]}`;
 };
 
 const toLocalDateString = (isoString?: string) => {
@@ -204,6 +202,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [contractSortMode, setContractSortMode] = useState<'billing' | 'recent'>('billing');
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
@@ -537,6 +536,17 @@ export default function App() {
       setCustomers(snapshot.docs.map(doc => ({ ...(doc.data() as Customer), id: doc.id })));
     });
     return () => unsubCustomers();
+  }, [currentUser]);
+
+  // Online presence heartbeat (updates last_seen every 60s)
+  useEffect(() => {
+    if (!currentUser) return;
+    const updatePresence = () => {
+      updateDoc(doc(db, 'profiles', currentUser.id), { last_seen: new Date().toISOString() }).catch(() => {});
+    };
+    updatePresence();
+    const interval = setInterval(updatePresence, 60000);
+    return () => clearInterval(interval);
   }, [currentUser]);
 
   // Cleanup date listener (Firestore-persisted)
@@ -1054,7 +1064,7 @@ export default function App() {
 
       if (leadData.sale_type === SaleType.RECORRENTE) {
         saleData.billing_cycle = leadData.billing_cycle || 'mensal';
-        saleData.contract_start = leadData.contract_start || new Date().toISOString().split('T')[0];
+        saleData.contract_start = leadData.contract_start || getLocalISODate();
         saleData.contract_end = leadData.contract_end || '';
         saleData.contract_status = ContractStatus.PENDENTE;
         saleData.next_billing_date = saleData.contract_start;
@@ -1313,26 +1323,22 @@ export default function App() {
       onConfirm: () => {
         setConfirmInput('');
         setConfirmModal({
-          title: '🚨 Confirmação Final',
-          message: `Para excluir "${customerName}"${salesCount > 0 ? ` e suas ${salesCount} venda(s)` : ''} permanentemente, digite EXCLUIR abaixo.`,
+          title: '🗑️ Mover para Lixeira',
+          message: `Para mover "${customerName}"${salesCount > 0 ? ` e suas ${salesCount} venda(s)` : ''} para a lixeira, digite EXCLUIR abaixo.`,
           requireInput: 'EXCLUIR',
-          confirmText: 'Excluir Permanentemente',
+          confirmText: 'Mover para Lixeira',
           cancelText: 'Cancelar',
           onConfirm: async () => {
             try {
-              // Delete all associated sales
+              const now = new Date().toISOString();
+              // Soft delete all associated sales
               for (const sale of customerSales) {
-                // Delete any receipts linked to this sale
-                const saleReceipts = receipts.filter(r => r.sale_id === sale.id);
-                for (const receipt of saleReceipts) {
-                  await deleteDoc(doc(db, 'receipts', receipt.id));
-                }
-                await deleteDoc(doc(db, 'sales', sale.id));
+                await updateDoc(doc(db, 'sales', sale.id), { previous_status: sale.status, status: SaleStatus.DELETED, deleted_at: now, updated_at: now });
               }
-              // Delete the customer
-              await deleteDoc(doc(db, 'customers', customerId));
-              await addLog(currentUser!, `Excluiu o cliente ${customerName} (${customerId}) e ${salesCount} venda(s) associada(s)`, customerId);
-              showToast(`Cliente "${customerName}" e ${salesCount} venda(s) excluídos com sucesso!`, 'success');
+              // Soft delete the customer
+              await updateDoc(doc(db, 'customers', customerId), { deleted_at: now, updated_at: now });
+              await addLog(currentUser!, `Moveu para lixeira: cliente ${customerName} (${customerId}) e ${salesCount} venda(s)`, customerId);
+              showToast(`"${customerName}" e ${salesCount} venda(s) movidos para a lixeira!`, 'success');
             } catch (error: any) {
               showToast('Erro ao excluir cliente: ' + error.message, 'error');
             }
@@ -1913,7 +1919,7 @@ export default function App() {
     { id: 'financial', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN] },
 
     { id: 'logs', label: 'Auditoria', icon: History, roles: [UserRole.ADMIN] },
-    { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR], badge: sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).length },
+    { id: 'trash', label: 'Aprovações de Exclusão', icon: Trash2, roles: [UserRole.ADMIN, UserRole.SUPERVISOR], badge: sales.filter(s => s.status === SaleStatus.EXCLUSAO_SOLICITADA).length + customers.filter(c => c.deleted_at && c.deleted_at.length > 0).length + sales.filter(s => s.status === SaleStatus.DELETED).length },
   ];
 
   return (
@@ -2255,12 +2261,21 @@ export default function App() {
                               <div key={tracker.id} className="space-y-2">
                                 <div className="flex justify-between items-center">
                                   <div className="flex items-center gap-2">
-                                    <div className="w-6 h-6 bg-zinc-100 rounded-full flex items-center justify-center overflow-hidden">
-                                      {tracker.photo_url ? (
-                                        <img src={tracker.photo_url} alt={tracker.name} className="w-full h-full object-cover" />
-                                      ) : (
-                                        <UserIcon className="w-3 h-3 text-zinc-400" />
-                                      )}
+                                    <div className="relative">
+                                      <div className="w-6 h-6 bg-zinc-100 rounded-full flex items-center justify-center overflow-hidden">
+                                        {tracker.photo_url ? (
+                                          <img src={tracker.photo_url} alt={tracker.name} className="w-full h-full object-cover" />
+                                        ) : (
+                                          <UserIcon className="w-3 h-3 text-zinc-400" />
+                                        )}
+                                      </div>
+                                      {(() => {
+                                        const user = users.find(u => u.id === tracker.id);
+                                        const isOnline = user?.last_seen && (Date.now() - new Date(user.last_seen).getTime()) < 120000;
+                                        return (
+                                          <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${isOnline ? 'bg-emerald-500' : 'bg-zinc-300'}`} title={isOnline ? 'Online' : 'Offline'} />
+                                        );
+                                      })()}
                                     </div>
                                     <p className="font-bold text-zinc-900">{tracker.name}</p>
                                   </div>
@@ -2492,6 +2507,8 @@ export default function App() {
                           .filter(c => {
                             // Text search filter
                             const matchesSearch = !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.phone.includes(searchQuery.replace(/\D/g, ''));
+                            // Exclude soft-deleted
+                            if (c.deleted_at && c.deleted_at.length > 0) return false;
                             // Vendor filter: check if any of the customer's sales belong to the selected vendor
                             const matchesVendor = !customerVendorFilter || sales.some(s => s.customer_id === c.id && s.vendedor_id === customerVendorFilter);
                             // Date filters
@@ -2637,6 +2654,14 @@ export default function App() {
                             </button>
                           )}
                         </div>
+                        <select
+                          value={contractSortMode}
+                          onChange={(e) => setContractSortMode(e.target.value as 'billing' | 'recent')}
+                          className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 bg-white font-medium text-zinc-700"
+                        >
+                          <option value="billing">📅 Próx. Cobrança</option>
+                          <option value="recent">🕐 Último Adicionado</option>
+                        </select>
                       </div>
                     </div>
                   </div>
@@ -2655,11 +2680,15 @@ export default function App() {
                       <tbody className="divide-y divide-black/5 text-sm">
                         {sales
                           .filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id && s.status !== SaleStatus.DELETED)
-                          .filter(s => 
-                            s.phone.includes(searchQuery.replace(/\D/g, '')) || 
-                            s.name?.toLowerCase().includes(searchQuery.toLowerCase())
+                          .filter(s => {
+                            if (!searchQuery) return true;
+                            const q = searchQuery.toLowerCase();
+                            return s.phone.includes(searchQuery.replace(/\D/g, '')) || s.name?.toLowerCase().includes(q);
+                          })
+                          .sort((a, b) => contractSortMode === 'recent'
+                            ? new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+                            : new Date(a.next_billing_date || '').getTime() - new Date(b.next_billing_date || '').getTime()
                           )
-                          .sort((a, b) => new Date(a.next_billing_date || '').getTime() - new Date(b.next_billing_date || '').getTime())
                           .map(sale => {
                             const isOverdue = new Date() > new Date(`${sale.next_billing_date}T23:59:59`) && sale.contract_status === ContractStatus.ATIVO;
                             const needsAction = isOverdue || sale.contract_status === ContractStatus.PENDENTE;
@@ -3490,7 +3519,14 @@ export default function App() {
                                 <p className="font-bold text-zinc-900">{sale.phone}</p>
                                 <p className="text-[10px] text-zinc-400">Criado: {new Date(sale.created_at).toLocaleDateString()}</p>
                               </td>
-                              <td className="px-6 py-4 text-sm text-zinc-600">{sale.service}</td>
+                              <td className="px-6 py-4 text-sm text-zinc-600">
+                                <div className="flex items-center gap-1.5">
+                                  {sale.service}
+                                  {(sale as Sale).parent_contract_id && (
+                                    <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[9px] font-bold rounded-md whitespace-nowrap">📋 Contrato</span>
+                                  )}
+                                </div>
+                              </td>
                               <td className="px-6 py-4">
                                 <p className="font-bold text-zinc-900">R$ {sale.value.toLocaleString()}</p>
                                 {sale.paid_at && (
@@ -3707,7 +3743,12 @@ export default function App() {
                                   <div className="flex justify-between items-start">
                                     <div>
                                       <p className="font-bold text-zinc-900">{sale.phone}</p>
-                                      <p className="text-xs text-zinc-500">{sale.service}</p>
+                                      <div className="flex items-center gap-1.5">
+                                        <p className="text-xs text-zinc-500">{sale.service}</p>
+                                        {sale.parent_contract_id && (
+                                          <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[9px] font-bold rounded-md">📋 Contrato</span>
+                                        )}
+                                      </div>
                                     </div>
                                     <span className="font-bold text-emerald-600 text-sm">R$ {sale.value.toLocaleString()}</span>
                                   </div>
@@ -4660,10 +4701,13 @@ export default function App() {
                     )}
                   </div>
                   <div className="space-y-4">
-                    {sales.filter(s => s.status === SaleStatus.DELETED).length === 0 ? (
+                    {(() => {
+                      const deletedCustomerIds = customers.filter(c => c.deleted_at && c.deleted_at.length > 0).map(c => c.id);
+                      const orphanDeletedSales = sales.filter(s => s.status === SaleStatus.DELETED && !deletedCustomerIds.includes(s.customer_id || ''));
+                      return orphanDeletedSales.length === 0 ? (
                       <p className="text-zinc-500 text-center py-8">Nenhuma venda na lixeira.</p>
                     ) : (
-                      sales.filter(s => s.status === SaleStatus.DELETED).map(sale => (
+                      orphanDeletedSales.map(sale => (
                         <div key={sale.id} className="flex items-center justify-between p-4 border border-red-100 rounded-2xl hover:bg-red-50/30 transition-colors">
                           <div className="flex flex-col gap-1">
                             <span className="font-bold text-zinc-900">{sale.name || 'Sem Nome'}</span>
@@ -4678,9 +4722,9 @@ export default function App() {
                                 onConfirm: async () => {
                                   try {
                                     await updateDoc(doc(db, 'sales', sale.id), {
-                                      status: sale.previous_status || SaleStatus.AGUARDANDO,
-                                      deleted_at: null,
-                                      deleted_by: null,
+                                      status: sale.previous_status || SaleStatus.PAGO,
+                                      deleted_at: '',
+                                      deleted_by: '',
                                       updated_at: new Date().toISOString()
                                     });
                                     await addLog(currentUser, `Restaurou venda ${sale.id} da lixeira`, sale.id);
@@ -4696,6 +4740,82 @@ export default function App() {
                           >
                             Restaurar
                           </button>
+                        </div>
+                      ))
+                    );
+                    })()}
+                  </div>
+
+                  {/* Deleted Customers Section */}
+                  <div className="flex justify-between items-center mt-8 mb-4 pt-6 border-t border-black/5">
+                    <h3 className="text-2xl font-bold text-zinc-900">🗑️ Clientes Excluídos</h3>
+                  </div>
+                  <div className="space-y-4">
+                    {customers.filter(c => c.deleted_at && c.deleted_at.length > 0).length === 0 ? (
+                      <p className="text-zinc-500 text-center py-8">Nenhum cliente na lixeira.</p>
+                    ) : (
+                      customers.filter(c => c.deleted_at && c.deleted_at.length > 0).map(customer => (
+                        <div key={customer.id} className="flex items-center justify-between p-4 border border-red-100 rounded-2xl hover:bg-red-50/30 transition-colors">
+                          <div className="flex flex-col gap-1">
+                            <span className="font-bold text-zinc-900">{customer.name}</span>
+                            <span className="text-sm text-zinc-500">📞 {customer.phone} — Excluído em {customer.deleted_at ? new Date(customer.deleted_at).toLocaleDateString('pt-BR') : '-'}</span>
+                            <span className="text-xs text-zinc-400">{sales.filter(s => s.customer_id === customer.id && s.status === SaleStatus.DELETED).length} venda(s) associada(s)</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <button 
+                              onClick={() => {
+                                setConfirmModal({
+                                  title: '↩️ Restaurar Cliente',
+                                  message: `Deseja restaurar "${customer.name}" e suas vendas?`,
+                                  confirmText: 'Restaurar',
+                                  onConfirm: async () => {
+                                    try {
+                                      const now = new Date().toISOString();
+                                      await updateDoc(doc(db, 'customers', customer.id), { deleted_at: '', updated_at: now });
+                                      const customerSales = sales.filter(s => s.customer_id === customer.id && s.status === SaleStatus.DELETED);
+                                      for (const sale of customerSales) {
+                                        await updateDoc(doc(db, 'sales', sale.id), { status: sale.previous_status || SaleStatus.PAGO, deleted_at: '', updated_at: now });
+                                      }
+                                      await addLog(currentUser, `Restaurou cliente ${customer.name} e ${customerSales.length} venda(s)`, customer.id);
+                                      showToast(`"${customer.name}" restaurado com sucesso!`, 'success');
+                                    } catch (error: any) {
+                                      showToast('Erro ao restaurar: ' + error.message, 'error');
+                                    }
+                                  }
+                                });
+                              }}
+                              className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-100 transition-colors font-medium text-sm"
+                            >
+                              Restaurar
+                            </button>
+                            <button 
+                              onClick={() => {
+                                setConfirmModal({
+                                  title: '🚨 Excluir Permanentemente',
+                                  message: `Excluir "${customer.name}" e todas as vendas PERMANENTEMENTE? Não pode ser desfeito.`,
+                                  confirmText: 'Excluir Definitivo',
+                                  onConfirm: async () => {
+                                    try {
+                                      const customerSales = sales.filter(s => s.customer_id === customer.id);
+                                      for (const sale of customerSales) {
+                                        const saleReceipts = receipts.filter(r => r.sale_id === sale.id);
+                                        for (const r of saleReceipts) await deleteDoc(doc(db, 'receipts', r.id));
+                                        await deleteDoc(doc(db, 'sales', sale.id));
+                                      }
+                                      await deleteDoc(doc(db, 'customers', customer.id));
+                                      await addLog(currentUser, `Excluiu permanentemente cliente ${customer.name} (${customer.id})`, customer.id);
+                                      showToast(`"${customer.name}" excluído permanentemente!`, 'success');
+                                    } catch (error: any) {
+                                      showToast('Erro: ' + error.message, 'error');
+                                    }
+                                  }
+                                });
+                              }}
+                              className="px-4 py-2 bg-red-50 text-red-600 rounded-xl hover:bg-red-100 transition-colors font-medium text-sm"
+                            >
+                              Excluir Definitivo
+                            </button>
+                          </div>
                         </div>
                       ))
                     )}

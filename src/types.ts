@@ -48,6 +48,7 @@ export interface Customer {
   services: string[];
   created_at: string;
   updated_at: string;
+  deleted_at?: string;
 }
 
 export interface UserProfile {
@@ -58,6 +59,7 @@ export interface UserProfile {
   daily_goal: number;
   commission: number;
   commissions?: Record<string, number>;
+  last_seen?: string;
   recurring_commission?: number;
   pix_key?: string;
   photo_url?: string;
