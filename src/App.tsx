@@ -239,7 +239,9 @@ export default function App() {
   const [editingSeller, setEditingSeller] = useState<UserProfile | null>(null);
   const [payingSeller, setPayingSeller] = useState<UserProfile | null>(null);
   const [salePendingReceipt, setSalePendingReceipt] = useState<Sale | null>(null);
-  const [rankingFilter, setRankingFilter] = useState<'daily' | 'weekly' | 'monthly' | 'all'>('daily');
+  const [rankingFilter, setRankingFilter] = useState<'daily' | 'weekly' | 'monthly' | 'all' | 'custom'>('daily');
+  const [rankingDateFrom, setRankingDateFrom] = useState('');
+  const [rankingDateTo, setRankingDateTo] = useState('');
   const [filters, setFilters] = useState({
     vendedor: '',
     status: '',
@@ -727,6 +729,10 @@ export default function App() {
             return paidDate >= startOfWeek && paidDate <= endOfWeek;
           } else if (rankingFilter === 'monthly') {
             return paidDate.startsWith(currentMonth);
+          } else if (rankingFilter === 'custom') {
+            if (rankingDateFrom && paidDate < rankingDateFrom) return false;
+            if (rankingDateTo && paidDate > rankingDateTo) return false;
+            return true;
           }
           return true;
         });
@@ -741,7 +747,7 @@ export default function App() {
       .filter(u => u.count > 0 || true) // Always show all users in ranking
       .sort((a, b) => b.total - a.total);
     return stats;
-  }, [sales, users, rankingFilter, isSaleRevenueApproved]);
+  }, [sales, users, rankingFilter, rankingDateFrom, rankingDateTo, isSaleRevenueApproved]);
 
   const stats = useMemo(() => {
     const start = dateRange.start;
@@ -4477,8 +4483,8 @@ export default function App() {
                     <p className="text-zinc-500 mt-2">Os melhores resultados da Dion Logos Agência</p>
                   </div>
 
-                  <div className="flex justify-center gap-2">
-                    {(['daily', 'weekly', 'monthly', 'all'] as const).map(f => (
+                  <div className="flex justify-center gap-2 flex-wrap">
+                    {(['daily', 'weekly', 'monthly', 'all', 'custom'] as const).map(f => (
                       <button
                         key={f}
                         onClick={() => setRankingFilter(f)}
@@ -4488,10 +4494,27 @@ export default function App() {
                             : 'bg-white text-zinc-500 hover:bg-zinc-100 border border-zinc-200'
                         }`}
                       >
-                        {f === 'daily' ? 'Diário' : f === 'weekly' ? 'Semanal' : f === 'monthly' ? 'Mensal' : 'Geral'}
+                        {f === 'daily' ? 'Diário' : f === 'weekly' ? 'Semanal' : f === 'monthly' ? 'Mensal' : f === 'all' ? 'Geral' : '📅 Personalizado'}
                       </button>
                     ))}
                   </div>
+                  {rankingFilter === 'custom' && (
+                    <div className="flex justify-center gap-3 items-center">
+                      <input 
+                        type="date" 
+                        value={rankingDateFrom} 
+                        onChange={(e) => setRankingDateFrom(e.target.value)}
+                        className="px-4 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                      />
+                      <span className="text-zinc-400 font-bold">até</span>
+                      <input 
+                        type="date" 
+                        value={rankingDateTo} 
+                        onChange={(e) => setRankingDateTo(e.target.value)}
+                        className="px-4 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                      />
+                    </div>
+                  )}
                   
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
                     {/* 2nd Place */}
