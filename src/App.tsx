@@ -137,7 +137,7 @@ const toLocalDateString = (isoString?: string) => {
   return getLocalISODate(new Date(isoString));
 };
 
-const SERVICES = ['Logotipo', 'Flayer', 'Faixada', 'Site', 'Outros'];
+const SERVICES = ['Logotipo', 'Flayer', 'Faixada', 'Site', 'Tráfego Pago', 'Edição de Vídeo', 'Outros'];
 
 // --- Status Label Map (visual only, DB values unchanged) ---
 const STATUS_LABELS: Record<string, string> = {
