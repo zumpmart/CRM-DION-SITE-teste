@@ -251,6 +251,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'list' | 'kanban'>('kanban');
 
   const [deletingSaleId, setDeletingSaleId] = useState<string | null>(null);
+  const [deleteContractConfirm, setDeleteContractConfirm] = useState<{ id: string; name: string; step: 1 | 2 } | null>(null);
 
   const [dateRange, setDateRange] = useState({
     start: getLocalISODate(),
@@ -671,7 +672,8 @@ export default function App() {
     in7Days.setDate(in7Days.getDate() + 7);
     
     return sales.filter(s => {
-      if (s.sale_type !== SaleType.RECORRENTE || s.contract_status !== ContractStatus.ATIVO || !s.next_billing_date) return false;
+      if (s.sale_type !== SaleType.RECORRENTE || !s.next_billing_date || s.parent_contract_id) return false;
+      if (s.contract_status !== ContractStatus.ATIVO && s.contract_status !== ContractStatus.PENDENTE) return false;
       const nextBilling = new Date(`${s.next_billing_date}T23:59:59`);
       return nextBilling >= now && nextBilling <= in7Days;
     }).length;
@@ -896,44 +898,54 @@ export default function App() {
           if (saleObj) {
             // Guard: prevent double payment
             const nextBilling = saleObj.next_billing_date || saleObj.contract_start;
-            if (nextBilling && new Date(`${nextBilling}T23:59:59`) > new Date()) {
+            const isFirstPayment = saleObj.contract_status === ContractStatus.PENDENTE || saleObj.next_billing_date === saleObj.contract_start;
+            if (!isFirstPayment && nextBilling && new Date(`${nextBilling}T23:59:59`) > new Date()) {
               showToast('Este período já foi pago. Aguarde o próximo vencimento.', 'warning');
               return;
             }
 
             const billingPeriod = nextBilling || new Date().toISOString().split('T')[0];
-            const currentNextBilling = new Date(billingPeriod);
+            const currentNextBilling = new Date(`${billingPeriod}T12:00:00`);
             if (saleObj.billing_cycle === 'trimestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 3);
             else if (saleObj.billing_cycle === 'semestral') currentNextBilling.setMonth(currentNextBilling.getMonth() + 6);
             else if (saleObj.billing_cycle === 'anual') currentNextBilling.setFullYear(currentNextBilling.getFullYear() + 1);
             else currentNextBilling.setMonth(currentNextBilling.getMonth() + 1);
             
-            updates.next_billing_date = currentNextBilling.toISOString().split('T')[0];
+            const y = currentNextBilling.getFullYear();
+            const m = String(currentNextBilling.getMonth() + 1).padStart(2, '0');
+            const d = String(currentNextBilling.getDate()).padStart(2, '0');
+            updates.next_billing_date = `${y}-${m}-${d}`;
             updates.last_payment_date = new Date().toISOString();
             updates.contract_status = ContractStatus.ATIVO;
 
+            // Update parent contract FIRST
+            await updateDoc(saleRef, updates);
+            logMsg = `Registrou pagamento (${billingPeriod}) e renovou ciclo do contrato para ${updates.next_billing_date}`;
+            await addLog(currentUser, logMsg, saleId);
+
             // Create child sale for commission tracking
-            await addDoc(collection(db, 'sales'), {
+            const childSale: Record<string, any> = {
               phone: saleObj.phone,
               name: saleObj.name || '',
-              service: saleObj.service,
-              services: saleObj.services || [saleObj.service],
+              service: saleObj.service || '',
+              services: saleObj.services || [saleObj.service || ''],
               value: saleObj.value,
               status: SaleStatus.PAGO,
               paid_at: new Date().toISOString(),
               sale_type: SaleType.RECORRENTE,
               vendedor_id: saleObj.vendedor_id,
-              customer_id: saleObj.customer_id,
               parent_contract_id: saleId,
               billing_period: billingPeriod,
               commission_paid: false,
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
-            });
+            };
+            if (saleObj.customer_id) childSale.customer_id = saleObj.customer_id;
+            await addDoc(collection(db, 'sales'), childSale);
 
-            logMsg = `Registrou pagamento (${billingPeriod}) e renovou ciclo do contrato para ${updates.next_billing_date}`;
+            showToast('Pagamento confirmado! Próx. cobrança: ' + updates.next_billing_date, 'success');
           }
-          break;
+          return; // Already handled updateDoc and log above
       }
 
       await updateDoc(saleRef, updates);
@@ -1044,13 +1056,8 @@ export default function App() {
         saleData.billing_cycle = leadData.billing_cycle || 'mensal';
         saleData.contract_start = leadData.contract_start || new Date().toISOString().split('T')[0];
         saleData.contract_end = leadData.contract_end || '';
-        saleData.contract_status = ContractStatus.ATIVO;
-        const start = new Date(saleData.contract_start);
-        if (leadData.billing_cycle === 'trimestral') start.setMonth(start.getMonth() + 3);
-        else if (leadData.billing_cycle === 'semestral') start.setMonth(start.getMonth() + 6);
-        else if (leadData.billing_cycle === 'anual') start.setFullYear(start.getFullYear() + 1);
-        else start.setMonth(start.getMonth() + 1);
-        saleData.next_billing_date = start.toISOString().split('T')[0];
+        saleData.contract_status = ContractStatus.PENDENTE;
+        saleData.next_billing_date = saleData.contract_start;
       }
 
       const docRef = await addDoc(collection(db, 'sales'), saleData);
@@ -2512,6 +2519,7 @@ export default function App() {
                                 <div className="font-bold text-zinc-900">{customer.name}</div>
                                 {sales
                                   .filter(s => s.customer_id === customer.id && !KANBAN_HIDDEN_STATUSES.includes(s.status) && s.status !== SaleStatus.DELETED)
+                                  .filter(s => !(s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id))
                                   .filter(s => {
                                     if (s.status === SaleStatus.PAGO) return isPagoVisibleInFlow(s) || receipts.some(r => r.sale_id === s.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
                                     if (s.status === SaleStatus.ARQUIVADO) return false;
@@ -2591,6 +2599,28 @@ export default function App() {
                   <div className="p-6 border-b border-black/5 flex flex-col gap-4">
                     <div className="flex justify-between items-center">
                       <h3 className="font-bold text-zinc-900">Gestão de Contratos</h3>
+                    </div>
+                    {(() => {
+                      const needsAttention = sales.filter(s => {
+                        if (s.sale_type !== SaleType.RECORRENTE || s.parent_contract_id || s.status === SaleStatus.DELETED) return false;
+                        if (s.contract_status === ContractStatus.PENDENTE) return true;
+                        if (s.contract_status === ContractStatus.ATIVO && s.next_billing_date) {
+                          return new Date() > new Date(`${s.next_billing_date}T23:59:59`);
+                        }
+                        return false;
+                      });
+                      return needsAttention.length > 0 ? (
+                        <div className="mb-2 bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-center gap-3">
+                          <div className="p-1.5 bg-amber-100 rounded-lg shrink-0">
+                            <AlertCircle className="w-4 h-4 text-amber-600" />
+                          </div>
+                          <p className="text-sm text-amber-800">
+                            <strong>{needsAttention.length}</strong> contrato(s) precisam de ação: {needsAttention.map(s => s.name || s.phone).join(', ')}
+                          </p>
+                        </div>
+                      ) : null;
+                    })()}
+                    <div className="flex justify-between items-center">
                       <div className="flex gap-2 items-center">
                         <div className="relative">
                           <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -2615,6 +2645,7 @@ export default function App() {
                       <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
                         <tr>
                           <th className="p-4 font-semibold">Cliente/Serviço</th>
+                          <th className="p-4 font-semibold">Vendedor</th>
                           <th className="p-4 font-semibold">Status</th>
                           <th className="p-4 font-semibold">Ciclo / Valor</th>
                           <th className="p-4 font-semibold">Próx. Cobrança</th>
@@ -2623,7 +2654,7 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-black/5 text-sm">
                         {sales
-                          .filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id)
+                          .filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id && s.status !== SaleStatus.DELETED)
                           .filter(s => 
                             s.phone.includes(searchQuery.replace(/\D/g, '')) || 
                             s.name?.toLowerCase().includes(searchQuery.toLowerCase())
@@ -2631,16 +2662,20 @@ export default function App() {
                           .sort((a, b) => new Date(a.next_billing_date || '').getTime() - new Date(b.next_billing_date || '').getTime())
                           .map(sale => {
                             const isOverdue = new Date() > new Date(`${sale.next_billing_date}T23:59:59`) && sale.contract_status === ContractStatus.ATIVO;
+                            const needsAction = isOverdue || sale.contract_status === ContractStatus.PENDENTE;
+                            const sellerName = users.find(u => u.id === sale.vendedor_id)?.name || 'Desconhecido';
                             return (
-                              <tr key={sale.id} className="hover:bg-zinc-50/50 transition-colors">
+                              <tr key={sale.id} className={`hover:bg-zinc-50/50 transition-colors ${needsAction ? 'bg-amber-50/60 border-l-4 border-l-amber-400' : ''}`}>
                                 <td className="p-4">
                                   <div className="font-bold text-zinc-900">{sale.name}</div>
                                   <div className="text-xs text-zinc-500">{sale.phone}</div>
                                   <div className="mt-1 text-xs font-semibold text-indigo-600">{(sale.services || [sale.service]).join(', ')}</div>
                                 </td>
+                                <td className="p-4 text-sm font-medium text-zinc-600">{sellerName}</td>
                                 <td className="p-4">
                                   <span className={`px-2 py-1 rounded-md text-xs font-bold uppercase ${
                                     sale.contract_status === ContractStatus.ATIVO ? 'bg-emerald-100 text-emerald-700' :
+                                    sale.contract_status === ContractStatus.PENDENTE ? 'bg-amber-100 text-amber-600' :
                                     sale.contract_status === ContractStatus.INADIMPLENTE ? 'bg-red-100 text-red-700' :
                                     sale.contract_status === ContractStatus.PAUSADO ? 'bg-amber-100 text-amber-700' :
                                     'bg-zinc-100 text-zinc-700'
@@ -2669,9 +2704,9 @@ export default function App() {
                               </tr>
                             );
                         })}
-                        {sales.filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id).length === 0 && (
+                        {sales.filter(s => s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id && s.status !== SaleStatus.DELETED).length === 0 && (
                           <tr>
-                            <td colSpan={5} className="p-8 text-center text-zinc-500">
+                            <td colSpan={6} className="p-8 text-center text-zinc-500">
                               Nenhum contrato recorrente registrado.
                             </td>
                           </tr>
@@ -2685,177 +2720,214 @@ export default function App() {
               {/* Contract Detail Modal */}
               <AnimatePresence>
                 {selectedContract && (() => {
-                  const contract = selectedContract;
+                  const contract = sales.find(s => s.id === selectedContract.id) || selectedContract;
                   const customer = customers.find(c => c.id === contract.customer_id);
                   const seller = users.find(u => u.id === contract.vendedor_id);
                   const isOverdue = new Date() > new Date(`${contract.next_billing_date}T23:59:59`) && contract.contract_status === ContractStatus.ATIVO;
                   return (
                     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedContract(null)}>
                       <motion.div 
-                        initial={{ opacity: 0, scale: 0.95 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.95 }}
+                        initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                        transition={{ type: 'spring', damping: 25, stiffness: 300 }}
                         className="bg-white w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {/* Header */}
-                        <div className="p-6 border-b border-black/5 flex justify-between items-center">
-                          <div>
-                            <h3 className="text-xl font-bold text-zinc-900">📋 Contrato</h3>
-                            <p className="text-sm text-zinc-500">{contract.name || contract.phone}</p>
-                          </div>
-                          <button onClick={() => setSelectedContract(null)} className="p-2 hover:bg-zinc-100 rounded-full transition-all">
-                            <X className="w-5 h-5 text-zinc-400" />
-                          </button>
-                        </div>
+                        {/* Premium Header */}
+                        {(() => {
+                          const nextBill = contract.next_billing_date || contract.contract_start;
+                          const isFirstPaymentDue = contract.contract_status === ContractStatus.PENDENTE || contract.next_billing_date === contract.contract_start;
+                          const isPeriodPaid = !isFirstPaymentDue && nextBill && new Date(`${nextBill}T23:59:59`) > new Date();
+                          const statusColor = contract.contract_status === ContractStatus.ATIVO 
+                            ? (isOverdue ? 'from-red-500 to-red-600' : 'from-emerald-500 to-emerald-600')
+                            : contract.contract_status === ContractStatus.PENDENTE ? 'from-amber-400 to-amber-500'
+                            : contract.contract_status === ContractStatus.PAUSADO ? 'from-amber-500 to-amber-600'
+                            : contract.contract_status === ContractStatus.INADIMPLENTE ? 'from-red-500 to-red-600'
+                            : 'from-zinc-500 to-zinc-600';
+                          return (
+                            <>
+                              <div className={`bg-gradient-to-r ${statusColor} p-6 text-white relative overflow-hidden`}>
+                                <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2" />
+                                <div className="absolute bottom-0 left-0 w-20 h-20 bg-white/5 rounded-full translate-y-1/2 -translate-x-1/2" />
+                                <div className="flex justify-between items-start relative z-10">
+                                  <div>
+                                    <p className="text-white/70 text-xs font-bold uppercase tracking-wider mb-1">Contrato Recorrente</p>
+                                    <h3 className="text-xl font-black">{contract.name || contract.phone}</h3>
+                                    <div className="flex items-center gap-2 mt-2">
+                                      <span className="px-2.5 py-1 bg-white/20 backdrop-blur-sm rounded-lg text-xs font-bold uppercase">
+                                        {contract.contract_status}
+                                      </span>
+                                      {isOverdue && contract.contract_status !== ContractStatus.INADIMPLENTE && (
+                                        <span className="px-2.5 py-1 bg-red-300/30 backdrop-blur-sm rounded-lg text-xs font-bold animate-pulse">
+                                          ⚠️ VENCIDO
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <button onClick={() => setSelectedContract(null)} className="p-2 hover:bg-white/20 rounded-full transition-all">
+                                    <X className="w-5 h-5 text-white" />
+                                  </button>
+                                </div>
+                                {/* Value highlight */}
+                                <div className="mt-4 flex items-baseline gap-1">
+                                  <span className="text-3xl font-black">R$ {contract.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                                  <span className="text-white/60 text-sm font-medium">/{contract.billing_cycle || 'mês'}</span>
+                                </div>
+                              </div>
 
-                        <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+                              {/* Payment Status Banner */}
+                              {(contract.contract_status === ContractStatus.ATIVO || contract.contract_status === ContractStatus.PENDENTE) && (
+                                <div className={`px-6 py-3 flex items-center justify-between ${isPeriodPaid ? 'bg-emerald-50 border-b border-emerald-100' : 'bg-amber-50 border-b border-amber-100'}`}>
+                                  {isPeriodPaid ? (
+                                    <>
+                                      <div className="flex items-center gap-2">
+                                        <Lock className="w-4 h-4 text-emerald-500" />
+                                        <span className="text-sm font-bold text-emerald-700">Pago até {new Date(`${nextBill}T12:00:00`).toLocaleDateString('pt-BR')}</span>
+                                      </div>
+                                      <CheckCircle className="w-5 h-5 text-emerald-500" />
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div className="flex items-center gap-2">
+                                        <DollarSign className="w-4 h-4 text-amber-500" />
+                                        <span className="text-sm font-bold text-amber-700">Pagamento pendente</span>
+                                      </div>
+                                      <button 
+                                        onClick={() => { handleContractAction(contract.id, 'pay'); setSelectedContract(null); }}
+                                        className="px-3 py-1.5 bg-emerald-500 text-white rounded-lg text-xs font-bold hover:bg-emerald-600 transition-colors shadow-sm"
+                                      >
+                                        ✓ Confirmar Pagamento
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+
+                        <div className="p-6 space-y-4 max-h-[55vh] overflow-y-auto">
                           {/* Cliente */}
-                          <div className="bg-zinc-50 p-4 rounded-2xl space-y-2">
-                            <p className="text-xs font-bold text-zinc-400 uppercase">👤 Cliente</p>
-                            <div className="grid grid-cols-2 gap-3 text-sm">
+                          <div className="bg-zinc-50 p-4 rounded-2xl">
+                            <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                              <Users className="w-3 h-3" /> Cliente
+                            </p>
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-3">
                               <div>
-                                <p className="text-zinc-500 text-xs">Nome</p>
-                                <p className="font-bold text-zinc-900">{contract.name || 'Não informado'}</p>
+                                <p className="text-[10px] text-zinc-400 uppercase">Nome</p>
+                                <p className="font-bold text-zinc-900 text-sm">{contract.name || 'Não informado'}</p>
                               </div>
                               <div>
-                                <p className="text-zinc-500 text-xs">Telefone</p>
-                                <p className="font-bold text-zinc-900">{contract.phone}</p>
+                                <p className="text-[10px] text-zinc-400 uppercase">Telefone</p>
+                                <p className="font-bold text-zinc-900 text-sm">{contract.phone}</p>
                               </div>
                               {customer && (
                                 <>
                                   <div>
-                                    <p className="text-zinc-500 text-xs">Cliente desde</p>
-                                    <p className="font-bold text-zinc-900">{new Date(customer.first_purchase_date).toLocaleDateString('pt-BR')}</p>
+                                    <p className="text-[10px] text-zinc-400 uppercase">Cliente desde</p>
+                                    <p className="font-bold text-zinc-900 text-sm">{new Date(customer.first_purchase_date).toLocaleDateString('pt-BR')}</p>
                                   </div>
                                   <div>
-                                    <p className="text-zinc-500 text-xs">Total gasto</p>
-                                    <p className="font-bold text-emerald-600">R$ {customer.total_spent?.toLocaleString() || '0'}</p>
+                                    <p className="text-[10px] text-zinc-400 uppercase">Total gasto</p>
+                                    <p className="font-bold text-emerald-600 text-sm">R$ {customer.total_spent?.toLocaleString() || '0'}</p>
                                   </div>
                                 </>
                               )}
                             </div>
                           </div>
 
-                          {/* Serviço */}
-                          <div className="bg-indigo-50/50 p-4 rounded-2xl space-y-2">
-                            <p className="text-xs font-bold text-indigo-400 uppercase">📦 Serviço</p>
-                            <div className="grid grid-cols-2 gap-3 text-sm">
-                              <div>
-                                <p className="text-zinc-500 text-xs">Serviço(s)</p>
-                                <p className="font-bold text-zinc-900">{(contract.services || [contract.service]).join(', ')}</p>
-                              </div>
-                              <div>
-                                <p className="text-zinc-500 text-xs">Valor</p>
-                                <p className="font-black text-emerald-600">R$ {contract.value.toLocaleString()}</p>
-                              </div>
-                              <div>
-                                <p className="text-zinc-500 text-xs">Ciclo</p>
-                                <p className="font-bold text-zinc-900 capitalize">{contract.billing_cycle || 'Mensal'}</p>
-                              </div>
-                              <div>
-                                <p className="text-zinc-500 text-xs">Vendedor</p>
-                                <p className="font-bold text-zinc-900">{seller?.name || 'Desconhecido'}</p>
-                              </div>
+                          {/* Serviço & Contrato */}
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="bg-indigo-50/60 p-4 rounded-2xl">
+                              <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                <PieChart className="w-3 h-3" /> Serviço
+                              </p>
+                              <p className="font-bold text-zinc-900 text-sm mb-1">{(contract.services || [contract.service]).join(', ')}</p>
+                              <p className="text-[10px] text-zinc-400">Ciclo: <span className="font-semibold text-zinc-600 capitalize">{contract.billing_cycle || 'mensal'}</span></p>
+                            </div>
+                            <div className="bg-amber-50/60 p-4 rounded-2xl">
+                              <p className="text-[10px] font-bold text-amber-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                <Calendar className="w-3 h-3" /> Datas
+                              </p>
+                              <p className="text-[10px] text-zinc-400">Início</p>
+                              <p className="font-bold text-zinc-900 text-sm">{contract.contract_start ? new Date(`${contract.contract_start}T12:00:00`).toLocaleDateString('pt-BR') : '—'}</p>
+                              <p className="text-[10px] text-zinc-400 mt-1">Próx. cobrança</p>
+                              <p className={`font-bold text-sm ${isOverdue ? 'text-red-600' : 'text-zinc-900'}`}>{contract.next_billing_date ? new Date(`${contract.next_billing_date}T12:00:00`).toLocaleDateString('pt-BR') : '—'}</p>
                             </div>
                           </div>
 
-                          {/* Contrato */}
-                          <div className="bg-amber-50/50 p-4 rounded-2xl space-y-2">
-                            <p className="text-xs font-bold text-amber-500 uppercase">📄 Contrato</p>
-                            <div className="grid grid-cols-2 gap-3 text-sm">
-                              <div>
-                                <p className="text-zinc-500 text-xs">Status</p>
-                                <span className={`inline-block px-2 py-1 rounded-md text-xs font-bold uppercase ${
-                                  contract.contract_status === ContractStatus.ATIVO ? 'bg-emerald-100 text-emerald-700' :
-                                  contract.contract_status === ContractStatus.INADIMPLENTE ? 'bg-red-100 text-red-700' :
-                                  contract.contract_status === ContractStatus.PAUSADO ? 'bg-amber-100 text-amber-700' :
-                                  'bg-zinc-100 text-zinc-700'
-                                }`}>
-                                  {contract.contract_status}
-                                </span>
-                                {isOverdue && contract.contract_status !== ContractStatus.INADIMPLENTE && (
-                                  <span className="ml-2 text-[10px] font-bold text-red-500 animate-pulse">VENCIDO!</span>
-                                )}
-                              </div>
-                              <div>
-                                <p className="text-zinc-500 text-xs">Início</p>
-                                <p className="font-bold text-zinc-900">{contract.contract_start ? new Date(`${contract.contract_start}T12:00:00`).toLocaleDateString('pt-BR') : '-'}</p>
-                              </div>
-                              <div>
-                                <p className="text-zinc-500 text-xs">Próx. cobrança</p>
-                                <p className={`font-bold ${isOverdue ? 'text-red-600' : 'text-zinc-900'}`}>{contract.next_billing_date ? new Date(`${contract.next_billing_date}T12:00:00`).toLocaleDateString('pt-BR') : '-'}</p>
-                              </div>
-                              <div>
-                                <p className="text-zinc-500 text-xs">Status venda</p>
-                                <p className="font-bold text-zinc-900">{getStatusLabel(contract.status)}</p>
-                              </div>
+                          {/* Vendedor */}
+                          <div className="flex items-center gap-3 bg-zinc-50 p-3 rounded-xl">
+                            <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center">
+                              <Users className="w-4 h-4 text-indigo-600" />
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-zinc-400 uppercase">Vendedor</p>
+                              <p className="font-bold text-zinc-900 text-sm">{seller?.name || 'Desconhecido'}</p>
                             </div>
                           </div>
 
                           {/* Notas */}
                           {contract.notes && (
                             <div className="bg-zinc-50 p-4 rounded-2xl">
-                              <p className="text-xs font-bold text-zinc-400 uppercase mb-1">📝 Notas</p>
+                              <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                                <Edit2 className="w-3 h-3" /> Notas
+                              </p>
                               <p className="text-sm text-zinc-700">{contract.notes}</p>
                             </div>
                           )}
                         </div>
 
-                        {/* Actions */}
-                        <div className="p-6 border-t border-black/5 flex flex-wrap gap-2">
-                          <a 
-                            href={`https://wa.me/${contract.phone.replace(/\D/g, '')}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-1.5 px-4 py-2 bg-green-50 text-green-600 rounded-xl text-sm font-bold hover:bg-green-100 transition-colors"
-                          >
-                            <MessageCircle className="w-4 h-4" /> WhatsApp
-                          </a>
-                          <button 
-                            onClick={() => { setEditingSale(contract); setSelectedContract(null); }}
-                            className="flex items-center gap-1.5 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl text-sm font-bold hover:bg-indigo-100 transition-colors"
-                          >
-                            <Edit2 className="w-4 h-4" /> Editar
-                          </button>
-                          {contract.contract_status === ContractStatus.ATIVO && (() => {
-                            const nextBill = contract.next_billing_date || contract.contract_start;
-                            const isPeriodPaid = nextBill && new Date(`${nextBill}T23:59:59`) > new Date();
-                            return isPeriodPaid ? (
-                              <span className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold">
-                                <CheckCircle className="w-4 h-4" /> Pago até {new Date(`${nextBill}T12:00:00`).toLocaleDateString('pt-BR')}
-                              </span>
-                            ) : (
+                        {/* Actions - Clean Grid */}
+                        <div className="p-4 border-t border-black/5 bg-zinc-50/50">
+                          <div className="grid grid-cols-2 gap-2">
+                            <a 
+                              href={`https://wa.me/${contract.phone.replace(/\D/g, '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center justify-center gap-2 px-4 py-2.5 bg-green-500 text-white rounded-xl text-sm font-bold hover:bg-green-600 transition-all shadow-sm"
+                            >
+                              <MessageCircle className="w-4 h-4" /> WhatsApp
+                            </a>
+                            <button 
+                              onClick={() => { setEditingSale(contract); setSelectedContract(null); }}
+                              className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-500 text-white rounded-xl text-sm font-bold hover:bg-indigo-600 transition-all shadow-sm"
+                            >
+                              <Edit2 className="w-4 h-4" /> Editar
+                            </button>
+                            {(contract.contract_status === ContractStatus.ATIVO || contract.contract_status === ContractStatus.PENDENTE) && (
                               <button 
-                                onClick={() => { handleContractAction(contract.id, 'pay'); setSelectedContract(null); }}
-                                className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold hover:bg-emerald-100 transition-colors"
+                                onClick={() => { handleContractAction(contract.id, 'pause'); setSelectedContract(null); }}
+                                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-100 text-amber-700 rounded-xl text-sm font-bold hover:bg-amber-200 transition-all"
                               >
-                                <CheckCircle className="w-4 h-4" /> Confirmar Pagamento
+                                Pausar
                               </button>
-                            );
-                          })()}
-                          {contract.contract_status === ContractStatus.ATIVO && (
+                            )}
+                            {contract.contract_status !== ContractStatus.ATIVO && contract.contract_status !== ContractStatus.PENDENTE && contract.contract_status !== ContractStatus.CANCELADO && (
+                              <button 
+                                onClick={() => { handleContractAction(contract.id, 'resume'); setSelectedContract(null); }}
+                                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-100 text-emerald-700 rounded-xl text-sm font-bold hover:bg-emerald-200 transition-all"
+                              >
+                                Retomar
+                              </button>
+                            )}
+                            {contract.contract_status !== ContractStatus.CANCELADO && (
+                              <button 
+                                onClick={() => { handleContractAction(contract.id, 'cancel'); setSelectedContract(null); }}
+                                className="flex items-center justify-center gap-2 px-4 py-2.5 bg-red-100 text-red-600 rounded-xl text-sm font-bold hover:bg-red-200 transition-all"
+                              >
+                                Cancelar
+                              </button>
+                            )}
+                          </div>
+                          {/* Delete with double confirmation */}
+                          {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.SUPERVISOR) && (
                             <button 
-                              onClick={() => { handleContractAction(contract.id, 'pause'); setSelectedContract(null); }}
-                              className="flex items-center gap-1.5 px-4 py-2 bg-amber-50 text-amber-600 rounded-xl text-sm font-bold hover:bg-amber-100 transition-colors"
+                              onClick={() => setDeleteContractConfirm({ id: contract.id, name: contract.name || contract.phone, step: 1 })}
+                              className="w-full mt-2 flex items-center justify-center gap-2 px-4 py-2 bg-transparent text-red-400 rounded-xl text-xs font-medium hover:bg-red-50 hover:text-red-600 transition-all border border-transparent hover:border-red-200"
                             >
-                              Pausar
-                            </button>
-                          )}
-                          {contract.contract_status !== ContractStatus.ATIVO && contract.contract_status !== ContractStatus.CANCELADO && (
-                            <button 
-                              onClick={() => { handleContractAction(contract.id, 'resume'); setSelectedContract(null); }}
-                              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-sm font-bold hover:bg-emerald-100 transition-colors"
-                            >
-                              Retomar
-                            </button>
-                          )}
-                          {contract.contract_status !== ContractStatus.CANCELADO && (
-                            <button 
-                              onClick={() => { handleContractAction(contract.id, 'cancel'); setSelectedContract(null); }}
-                              className="flex items-center gap-1.5 px-4 py-2 bg-red-50 text-red-600 rounded-xl text-sm font-bold hover:bg-red-100 transition-colors"
-                            >
-                              Cancelar Contrato
+                              <Trash2 className="w-3.5 h-3.5" /> Excluir contrato permanentemente
                             </button>
                           )}
                         </div>
@@ -2863,6 +2935,76 @@ export default function App() {
                     </div>
                   );
                 })()}
+              </AnimatePresence>
+
+              {/* Delete Contract Confirmation Modal */}
+              <AnimatePresence>
+                {deleteContractConfirm && (
+                  <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setDeleteContractConfirm(null)}>
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+                      className="bg-white w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {deleteContractConfirm.step === 1 ? (
+                        <>
+                          <div className="p-6 text-center">
+                            <div className="w-14 h-14 mx-auto mb-4 rounded-full bg-red-100 flex items-center justify-center">
+                              <Trash2 className="w-7 h-7 text-red-500" />
+                            </div>
+                            <h3 className="text-lg font-bold text-zinc-900 mb-2">Excluir contrato</h3>
+                            <p className="text-sm text-zinc-500">Deseja realmente excluir o contrato de <strong className="text-zinc-700">{deleteContractConfirm.name}</strong>?</p>
+                          </div>
+                          <div className="p-4 border-t border-zinc-100 flex gap-3">
+                            <button
+                              onClick={() => setDeleteContractConfirm(null)}
+                              className="flex-1 px-4 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-bold hover:bg-zinc-200 transition-all"
+                            >
+                              Cancelar
+                            </button>
+                            <button
+                              onClick={() => setDeleteContractConfirm(prev => prev ? { ...prev, step: 2 } : null)}
+                              className="flex-1 px-4 py-2.5 bg-red-500 text-white rounded-xl text-sm font-bold hover:bg-red-600 transition-all shadow-sm"
+                            >
+                              Sim, excluir
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="p-6 text-center">
+                            <div className="w-14 h-14 mx-auto mb-4 rounded-full bg-red-500 flex items-center justify-center animate-pulse">
+                              <AlertCircle className="w-7 h-7 text-white" />
+                            </div>
+                            <h3 className="text-lg font-bold text-red-600 mb-2">Tem certeza absoluta?</h3>
+                            <p className="text-sm text-zinc-500">Esta ação é <strong className="text-red-600">irreversível</strong>. O contrato e todo o histórico serão excluídos.</p>
+                          </div>
+                          <div className="p-4 border-t border-zinc-100 flex gap-3">
+                            <button
+                              onClick={() => setDeleteContractConfirm(null)}
+                              className="flex-1 px-4 py-2.5 bg-zinc-100 text-zinc-700 rounded-xl text-sm font-bold hover:bg-zinc-200 transition-all"
+                            >
+                              Cancelar
+                            </button>
+                            <button
+                              onClick={() => {
+                                handleDeleteSale(deleteContractConfirm.id);
+                                setDeleteContractConfirm(null);
+                                setSelectedContract(null);
+                              }}
+                              className="flex-1 px-4 py-2.5 bg-red-600 text-white rounded-xl text-sm font-bold hover:bg-red-700 transition-all shadow-lg shadow-red-200"
+                            >
+                              Excluir definitivamente
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </motion.div>
+                  </div>
+                )}
               </AnimatePresence>
 
               {currentPage === 'new-lead' && (
@@ -3104,6 +3246,7 @@ export default function App() {
                         const formData = new FormData(e.currentTarget);
                         const leadData = {
                           phone: newSaleSelectedCustomer!.phone,
+                          name: newSaleSaleType === SaleType.RECORRENTE ? (formData.get('contract_name') as string || newSaleSelectedCustomer!.name) : newSaleSelectedCustomer!.name,
                           services: newSaleServices,
                           service: newSaleServices[0],
                           value: Number(formData.get('value')),
@@ -3162,6 +3305,11 @@ export default function App() {
                         </div>
 
                         {newSaleSaleType === SaleType.RECORRENTE && (
+                          <div className="space-y-4">
+                            <div className="space-y-2">
+                              <label className="text-sm font-semibold text-zinc-700">Nome do Contrato</label>
+                              <input name="contract_name" type="text" defaultValue={newSaleSelectedCustomer?.name || ''} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="Nome do cliente no contrato" />
+                            </div>
                           <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-2">
                               <label className="text-sm font-semibold text-zinc-700">Ciclo de Cobrança</label>
@@ -3176,6 +3324,7 @@ export default function App() {
                               <label className="text-sm font-semibold text-zinc-700">Início do Contrato</label>
                               <input name="contract_start" type="date" defaultValue={getLocalISODate()} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
                             </div>
+                          </div>
                           </div>
                         )}
 

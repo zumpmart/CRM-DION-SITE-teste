@@ -30,6 +30,7 @@ export enum SaleType {
 }
 
 export enum ContractStatus {
+  PENDENTE = "PENDENTE",
   ATIVO = "ATIVO",
   PAUSADO = "PAUSADO",
   CANCELADO = "CANCELADO",
