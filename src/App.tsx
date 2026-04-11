@@ -157,10 +157,16 @@ const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleSt
 
 // --- Stale AGUARDANDO detection (>8h) ---
 const STALE_HOURS = 8;
+const PRIORITY_HOURS = 20;
 const isStaleAguardando = (sale: Sale) => {
   if (sale.status !== SaleStatus.AGUARDANDO) return false;
   const elapsed = Date.now() - new Date(sale.updated_at).getTime();
   return elapsed > STALE_HOURS * 60 * 60 * 1000;
+};
+const isPriorityAguardando = (sale: Sale) => {
+  if (sale.status !== SaleStatus.AGUARDANDO) return false;
+  const elapsed = Date.now() - new Date(sale.updated_at).getTime();
+  return elapsed > PRIORITY_HOURS * 60 * 60 * 1000;
 };
 
 const getStaleHours = (sale: Sale) => {
@@ -3539,6 +3545,11 @@ export default function App() {
                             // PAGO: only show if paid today
                             if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale) && !receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'))) return false;
                             return true;
+                          }).sort((a, b) => {
+                            const aPriority = isPriorityAguardando(a as Sale) ? 1 : 0;
+                            const bPriority = isPriorityAguardando(b as Sale) ? 1 : 0;
+                            if (aPriority !== bPriority) return bPriority - aPriority;
+                            return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
                           }).map((sale) => (
                             <tr key={sale.id} className={`hover:bg-zinc-50 transition-all ${isStaleAguardando(sale as Sale) ? 'bg-red-50/40' : ''}`}>
                               <td className="px-6 py-4 text-sm text-zinc-500">{new Date(sale.created_at).toLocaleDateString()}</td>
@@ -3712,7 +3723,12 @@ export default function App() {
                             }
                             
                             return true;
-                          }).sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+                          }).sort((a, b) => {
+                            const aPriority = isPriorityAguardando(a) ? 1 : 0;
+                            const bPriority = isPriorityAguardando(b) ? 1 : 0;
+                            if (aPriority !== bPriority) return bPriority - aPriority;
+                            return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+                          });
 
                           return (
                           <div 
