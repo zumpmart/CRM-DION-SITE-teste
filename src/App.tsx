@@ -174,8 +174,17 @@ const getStaleHours = (sale: Sale) => {
   return Math.floor(elapsed / (60 * 60 * 1000));
 };
 
-
-
+// --- Stale PENDENTE detection (>48h) ---
+const STALE_PENDENTE_HOURS = 48;
+const isStalePendente = (sale: Sale) => {
+  if (sale.status !== SaleStatus.PENDENTE) return false;
+  const elapsed = Date.now() - new Date(sale.updated_at).getTime();
+  return elapsed > STALE_PENDENTE_HOURS * 60 * 60 * 1000;
+};
+const getStaleDays = (sale: Sale) => {
+  const elapsed = Date.now() - new Date(sale.updated_at).getTime();
+  return Math.floor(elapsed / (24 * 60 * 60 * 1000));
+};
 // --- PAGO visibility: only show if paid today ---
 const isPagoVisibleInFlow = (sale: Sale) => {
   if (sale.status !== SaleStatus.PAGO) return false;
@@ -3546,12 +3555,12 @@ export default function App() {
                             if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale) && !receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'))) return false;
                             return true;
                           }).sort((a, b) => {
-                            const aPriority = isPriorityAguardando(a as Sale) ? 1 : 0;
-                            const bPriority = isPriorityAguardando(b as Sale) ? 1 : 0;
+                            const aPriority = (isPriorityAguardando(a as Sale) || isStalePendente(a as Sale)) ? 1 : 0;
+                            const bPriority = (isPriorityAguardando(b as Sale) || isStalePendente(b as Sale)) ? 1 : 0;
                             if (aPriority !== bPriority) return bPriority - aPriority;
                             return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
                           }).map((sale) => (
-                            <tr key={sale.id} className={`hover:bg-zinc-50 transition-all ${isStaleAguardando(sale as Sale) ? 'bg-red-50/40' : ''}`}>
+                            <tr key={sale.id} className={`hover:bg-zinc-50 transition-all ${isStaleAguardando(sale as Sale) ? 'bg-red-50/40' : isStalePendente(sale as Sale) ? 'bg-amber-50/40' : ''}`}>
                               <td className="px-6 py-4 text-sm text-zinc-500">{new Date(sale.created_at).toLocaleDateString()}</td>
                               {currentUser.role !== UserRole.VENDEDOR && (
                                 <td className="px-6 py-4 text-sm font-medium text-zinc-900">
@@ -3603,6 +3612,12 @@ export default function App() {
                                   {isStaleAguardando(sale as Sale) && (
                                     <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded-full w-fit animate-pulse">
                                       ⚠️ Sem atendimento há {getStaleHours(sale as Sale)}h{getStaleHours(sale as Sale) >= 12 ? ' — Recomendamos arquivar' : ''}
+                                    </span>
+                                  )}
+                                  {/* Stale PENDENTE alert in list */}
+                                  {isStalePendente(sale as Sale) && (
+                                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full w-fit animate-pulse">
+                                      ⏳ Projeto parado há {getStaleDays(sale as Sale)} dia(s){getStaleDays(sale as Sale) >= 3 ? ' — Verificar com o cliente' : ''}
                                     </span>
                                   )}
                                   {/* Receipt Rejected alert in list */}
@@ -3724,8 +3739,8 @@ export default function App() {
                             
                             return true;
                           }).sort((a, b) => {
-                            const aPriority = isPriorityAguardando(a) ? 1 : 0;
-                            const bPriority = isPriorityAguardando(b) ? 1 : 0;
+                            const aPriority = (isPriorityAguardando(a) || isStalePendente(a)) ? 1 : 0;
+                            const bPriority = (isPriorityAguardando(b) || isStalePendente(b)) ? 1 : 0;
                             if (aPriority !== bPriority) return bPriority - aPriority;
                             return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
                           });
@@ -3746,6 +3761,7 @@ export default function App() {
                             <div className="p-4 flex-1 overflow-y-auto flex flex-col gap-3">
                               {statusSales.map(sale => {
                                 const stale = isStaleAguardando(sale);
+                                const stalePendente = isStalePendente(sale);
 
                                 const isPago = sale.status === SaleStatus.PAGO;
                                 const isReceiptLocked = currentUser.role === UserRole.VENDEDOR && receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'));
@@ -3755,7 +3771,7 @@ export default function App() {
                                   key={sale.id}
                                   draggable={!isLocked}
                                   onDragStart={(e) => isLocked ? e.preventDefault() : handleDragStart(e, sale.id)}
-                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all flex flex-col gap-3 ${isLocked ? 'opacity-70 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'} ${stale ? 'border-red-300 ring-1 ring-red-200' : isPago ? 'border-emerald-300 ring-1 ring-emerald-200' : 'border-black/5'}`}
+                                  className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all flex flex-col gap-3 ${isLocked ? 'opacity-70 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'} ${stale ? 'border-red-300 ring-1 ring-red-200' : stalePendente ? 'border-amber-300 ring-1 ring-amber-200' : isPago ? 'border-emerald-300 ring-1 ring-emerald-200' : 'border-black/5'}`}
                                 >
                                   {/* Lock badge */}
                                   {isPago && (
@@ -3779,6 +3795,12 @@ export default function App() {
                                   {stale && (
                                     <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-1 rounded-lg animate-pulse">
                                       ⚠️ Sem atendimento há {getStaleHours(sale)}h{getStaleHours(sale) >= 12 ? ' — Recomendamos arquivar' : ''}
+                                    </span>
+                                  )}
+                                  {/* Stale PENDENTE alert */}
+                                  {stalePendente && (
+                                    <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-1 rounded-lg animate-pulse">
+                                      ⏳ Projeto parado há {getStaleDays(sale)} dia(s){getStaleDays(sale) >= 3 ? ' — Verificar com o cliente' : ''}
                                     </span>
                                   )}
                                   {/* Receipt Rejected alert */}
