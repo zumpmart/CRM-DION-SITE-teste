@@ -811,7 +811,7 @@ export default function App() {
     const statusCounts = {
       [SaleStatus.AGUARDANDO]: createdInRange.filter(s => s.status === SaleStatus.AGUARDANDO).length,
       [SaleStatus.PENDENTE]: createdInRange.filter(s => s.status === SaleStatus.PENDENTE).length,
-      [SaleStatus.PAGO]: createdInRange.filter(s => s.status === SaleStatus.PAGO).length,
+      [SaleStatus.PAGO]: paidInRange.length,
       [SaleStatus.CANCELADO]: createdInRange.filter(s => s.status === SaleStatus.CANCELADO).length,
     };
 
