@@ -769,11 +769,17 @@ export default function App() {
     const end = dateRange.end;
     const hasDateFilter = !!start || !!end;
     
-    // Apply dashboard vendor filter for admins
+    // Use all sales (not mySales which is affected by flow tab filters)
     const isAdminOrManager = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.SUPERVISOR;
+    const allActiveSales = sales.filter(s => {
+      if (s.status === SaleStatus.DELETED) return false;
+      if (s.sale_type === SaleType.RECORRENTE && !s.parent_contract_id) return false;
+      if (!isAdminOrManager && s.vendedor_id !== currentUser?.id) return false;
+      return true;
+    });
     const dashboardSales = isAdminOrManager && dashboardVendorFilter
-      ? mySales.filter(s => s.vendedor_id === dashboardVendorFilter)
-      : mySales;
+      ? allActiveSales.filter(s => s.vendedor_id === dashboardVendorFilter)
+      : allActiveSales;
 
     // Leads created in this range (or all if no filter)
     const createdInRange = hasDateFilter ? dashboardSales.filter(s => {
