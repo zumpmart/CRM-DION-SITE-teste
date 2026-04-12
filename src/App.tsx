@@ -288,6 +288,7 @@ export default function App() {
   const [customerDateFrom, setCustomerDateFrom] = useState<string>('');
   const [customerDateTo, setCustomerDateTo] = useState<string>('');
   const [customerSortBy, setCustomerSortBy] = useState<'name' | 'spent_desc' | 'spent_asc' | 'purchases_desc' | 'purchases_asc' | 'recent'>('recent');
+  const [customerPage, setCustomerPage] = useState(1);
   const [duplicateCustomerFound, setDuplicateCustomerFound] = useState<Customer | null>(null);
   const [pendingLeadData, setPendingLeadData] = useState<any>(null);
   const [newSaleSearchPhone, setNewSaleSearchPhone] = useState<string>('');
@@ -2492,7 +2493,7 @@ export default function App() {
                           <input
                             type="text"
                             value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
+                            onChange={(e) => { setSearchQuery(e.target.value); setCustomerPage(1); }}
                             placeholder="Buscar cliente por nome ou telefone..."
                             className="pl-9 pr-4 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 w-72"
                           />
@@ -2507,7 +2508,7 @@ export default function App() {
                     <div className="flex gap-2 flex-wrap items-center">
                       <select 
                         value={customerVendorFilter}
-                        onChange={(e) => setCustomerVendorFilter(e.target.value)}
+                        onChange={(e) => { setCustomerVendorFilter(e.target.value); setCustomerPage(1); }}
                         className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                       >
                         <option value="">Todos os Vendedores</option>
@@ -2517,7 +2518,7 @@ export default function App() {
                       </select>
                       <select
                         value={customerSortBy}
-                        onChange={(e) => setCustomerSortBy(e.target.value as any)}
+                        onChange={(e) => { setCustomerSortBy(e.target.value as any); setCustomerPage(1); }}
                         className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                       >
                         <option value="recent">Mais Recentes</option>
@@ -2529,14 +2530,14 @@ export default function App() {
                       <input 
                         type="date"
                         value={customerDateFrom}
-                        onChange={(e) => setCustomerDateFrom(e.target.value)}
+                        onChange={(e) => { setCustomerDateFrom(e.target.value); setCustomerPage(1); }}
                         className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                         title="Data de cadastro (a partir de)"
                       />
                       <input 
                         type="date"
                         value={customerDateTo}
-                        onChange={(e) => setCustomerDateTo(e.target.value)}
+                        onChange={(e) => { setCustomerDateTo(e.target.value); setCustomerPage(1); }}
                         className="px-3 py-2 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
                         title="Data de cadastro (até)"
                       />
@@ -2556,7 +2557,9 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-black/5 text-sm">
-                        {customers
+                        {(() => {
+                          const CUSTOMERS_PER_PAGE = 50;
+                          const filteredCustomers = customers
                           .filter(c => {
                             // Text search filter
                             const matchesSearch = !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.phone.includes(searchQuery.replace(/\D/g, ''));
@@ -2581,8 +2584,11 @@ export default function App() {
                               case 'recent':
                               default: return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
                             }
-                          })
-                          .map(customer => (
+                          });
+                          const totalPages = Math.ceil(filteredCustomers.length / CUSTOMERS_PER_PAGE);
+                          const safePage = Math.min(customerPage, totalPages || 1);
+                          const paginatedCustomers = filteredCustomers.slice((safePage - 1) * CUSTOMERS_PER_PAGE, safePage * CUSTOMERS_PER_PAGE);
+                          return paginatedCustomers.map(customer => (
                           <tr key={customer.id} className="hover:bg-zinc-50/50 transition-colors">
                             <td className="p-4">
                               <div className="flex items-center gap-2 flex-wrap">
@@ -2650,7 +2656,8 @@ export default function App() {
                               )}
                             </td>
                           </tr>
-                        ))}
+                        ));
+                        })()}
                         {customers.length === 0 && (
                           <tr>
                             <td colSpan={7} className="p-8 text-center text-zinc-500">
@@ -2661,6 +2668,43 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
+                  {/* Pagination */}
+                  {(() => {
+                    const CUSTOMERS_PER_PAGE = 50;
+                    const total = customers.filter(c => {
+                      const matchesSearch = !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.phone.includes(searchQuery.replace(/\D/g, ''));
+                      if (c.deleted_at && c.deleted_at.length > 0) return false;
+                      const matchesVendor = !customerVendorFilter || sales.some(s => s.customer_id === c.id && s.vendedor_id === customerVendorFilter);
+                      const custDate = toLocalDateString(c.created_at);
+                      const matchesDateFrom = !customerDateFrom || custDate >= customerDateFrom;
+                      const matchesDateTo = !customerDateTo || custDate <= customerDateTo;
+                      return matchesSearch && matchesVendor && matchesDateFrom && matchesDateTo;
+                    }).length;
+                    const totalPages = Math.ceil(total / CUSTOMERS_PER_PAGE);
+                    if (totalPages <= 1) return null;
+                    const safePage = Math.min(customerPage, totalPages);
+                    return (
+                      <div className="flex justify-between items-center px-6 py-4 border-t border-black/5">
+                        <span className="text-sm text-zinc-500">{total} cliente(s) • Página {safePage} de {totalPages}</span>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => { setCustomerPage(p => Math.max(1, p - 1)); }}
+                            disabled={safePage <= 1}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                          >
+                            ← Anterior
+                          </button>
+                          <button
+                            onClick={() => { setCustomerPage(p => Math.min(totalPages, p + 1)); }}
+                            disabled={safePage >= totalPages}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-indigo-600 text-white hover:bg-indigo-700"
+                          >
+                            Próxima →
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
