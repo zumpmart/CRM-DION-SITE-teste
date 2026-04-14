@@ -640,6 +640,12 @@ export default function App() {
     }
   };
 
+  // Helper: get sale phone for readable log messages
+  const getSaleLabel = (saleId: string) => {
+    const sale = sales.find(s => s.id === saleId);
+    return sale?.phone || saleId;
+  };
+
   // --- Logic ---
 
   const mySales = useMemo(() => {
@@ -1162,7 +1168,7 @@ export default function App() {
       }
       const changeString = changes.length > 0 ? ` (${changes.join(', ')})` : '';
 
-      await addLog(currentUser, `Editou venda ${saleId}${changeString}`, saleId);
+      await addLog(currentUser, `Editou venda ${getSaleLabel(saleId)}${changeString}`, saleId);
       setEditingSale(null);
     } catch (error: any) {
       showToast('Erro ao editar venda: ' + error.message, 'error');
@@ -1210,7 +1216,7 @@ export default function App() {
               status: SaleStatus.ARQUIVADO, 
               updated_at: new Date().toISOString() 
             });
-            await addLog(currentUser, `Arquivou a venda ${saleId}`, saleId);
+            await addLog(currentUser, `Arquivou a venda ${getSaleLabel(saleId)}`, saleId);
             showToast('Lead arquivado com sucesso!', 'success');
           } catch (error: any) {
             showToast('Erro ao arquivar: ' + error.message, 'error');
@@ -1242,7 +1248,7 @@ export default function App() {
                 previous_status: sale?.status,
                 updated_at: new Date().toISOString()
               });
-              await addLog(currentUser, `Solicitou exclusão da venda ${saleId} (cliente tem ${otherActiveSales.length} outra(s) venda(s))`, saleId);
+              await addLog(currentUser, `Solicitou exclusão da venda ${getSaleLabel(saleId)} (cliente tem ${otherActiveSales.length} outra(s) venda(s))`, saleId);
               showToast('Solicitação de exclusão enviada ao admin.', 'info');
             } catch (err: any) {
               showToast('Erro: ' + err.message, 'error');
@@ -1254,7 +1260,7 @@ export default function App() {
                 status: SaleStatus.ARQUIVADO,
                 updated_at: new Date().toISOString()
               });
-              await addLog(currentUser, `Arquivou a venda ${saleId}`, saleId);
+              await addLog(currentUser, `Arquivou a venda ${getSaleLabel(saleId)}`, saleId);
               showToast('Lead arquivado com sucesso!', 'success');
             } catch (err: any) {
               showToast('Erro ao arquivar: ' + err.message, 'error');
@@ -1275,7 +1281,7 @@ export default function App() {
               previous_status: sale?.status,
               updated_at: new Date().toISOString()
             });
-            await addLog(currentUser, `Solicitou exclusão da venda ${saleId}`, saleId);
+            await addLog(currentUser, `Solicitou exclusão da venda ${getSaleLabel(saleId)}`, saleId);
             showToast('Solicitação de exclusão enviada ao admin.', 'info');
           } catch (err: any) {
             showToast('Erro: ' + err.message, 'error');
@@ -1300,7 +1306,7 @@ export default function App() {
 
     try {
       await updateDoc(doc(db, 'sales', saleId), updates);
-      await addLog(currentUser, `Alterou status da venda ${saleId} de ${sale?.status} para ${newStatus}`, saleId);
+      await addLog(currentUser, `Alterou status da venda ${getSaleLabel(saleId)} de ${sale?.status} para ${newStatus}`, saleId);
     } catch (error: any) {
       showToast('Erro ao atualizar status: ' + error.message, 'error');
     }
@@ -1326,7 +1332,7 @@ export default function App() {
           deleted_by: currentUser.id,
           updated_at: new Date().toISOString()
         });
-        await addLog(currentUser, `Moveu venda ${saleId} para lixeira`, saleId);
+        await addLog(currentUser, `Moveu venda ${getSaleLabel(saleId)} para lixeira`, saleId);
         showToast('Venda movida para a lixeira.', 'success');
       } else {
         await updateDoc(doc(db, 'sales', saleId), {
@@ -1334,7 +1340,7 @@ export default function App() {
           previous_status: sale.status,
           updated_at: new Date().toISOString()
         });
-        await addLog(currentUser, `Solicitou exclusão da venda ${saleId}`, saleId);
+        await addLog(currentUser, `Solicitou exclusão da venda ${getSaleLabel(saleId)}`, saleId);
         showToast('Solicitação de exclusão enviada!', 'success');
       }
     } catch (error: any) {
@@ -1750,7 +1756,7 @@ export default function App() {
         created_at: new Date().toISOString()
       });
 
-      await addLog(currentUser, `Enviou comprovante para venda ${saleId}`, receiptRef.id);
+      await addLog(currentUser, `Enviou comprovante para venda ${getSaleLabel(saleId)}`, receiptRef.id);
 
       // Clear receipt_rejected flag if it was set
       if (sale.receipt_rejected) {
@@ -1796,7 +1802,7 @@ export default function App() {
             receipt_rejection_reason: 'Comprovante Duplicado',
             updated_at: new Date().toISOString()
           });
-          await addLog(currentUser, `Comprovante duplicado detectado na venda ${saleId} — venda revertida para Atendimento Iniciado`, saleId);
+          await addLog(currentUser, `Comprovante duplicado detectado na venda ${getSaleLabel(saleId)} — venda revertida para Atendimento Iniciado`, saleId);
           showToast('🚫 Comprovante duplicado! Venda devolvida para enviar novo comprovante.', 'error');
         } else {
           showToast(`⚠️ Divergência detectada: ${result.details}`, 'warning');
