@@ -4027,6 +4027,7 @@ export default function App() {
                           <tr>
                             <th className="px-4 py-3 font-semibold">Data</th>
                             <th className="px-4 py-3 font-semibold">Vendedor</th>
+                            <th className="px-4 py-3 font-semibold">Cliente</th>
                             <th className="px-4 py-3 font-semibold">Serviço</th>
                             <th className="px-4 py-3 font-semibold">Arquivo</th>
                             <th className="px-4 py-3 font-semibold">Valor Confirmado</th>
@@ -4039,7 +4040,7 @@ export default function App() {
                         <tbody className="divide-y divide-black/5">
                           {filteredReceipts.length === 0 ? (
                             <tr>
-                              <td colSpan={8} className="px-4 py-12 text-center text-zinc-400">
+                              <td colSpan={10} className="px-4 py-12 text-center text-zinc-400">
                                 Nenhum comprovante encontrado para este filtro
                               </td>
                             </tr>
@@ -4050,6 +4051,12 @@ export default function App() {
                             }`}>
                               <td className="px-4 py-3 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleDateString()}</td>
                               <td className="px-4 py-3 text-sm font-medium text-zinc-900">{users.find(u => u.id === receipt.vendedor_id)?.name}</td>
+                              <td className="px-4 py-3 text-sm text-zinc-700">
+                                {(() => {
+                                  const sale = sales.find(s => s.id === receipt.sale_id);
+                                  return sale?.phone || <span className="text-zinc-400">—</span>;
+                                })()}
+                              </td>
                               <td className="px-4 py-3 text-sm">
                                 {(() => {
                                   const sale = sales.find(s => s.id === receipt.sale_id);
