@@ -5447,6 +5447,10 @@ export default function App() {
                         setIsUploadingReceipt(true);
                         try {
                           await handleUploadReceipt(pendingSaleId, file, confirmedValue);
+                          // Update the sale value to match the confirmed value
+                          if (confirmedValue !== salePendingReceipt.value) {
+                            await updateDoc(doc(db, 'sales', pendingSaleId), { value: confirmedValue });
+                          }
                           await handleUpdateStatus(pendingSaleId, SaleStatus.PAGO, true);
                           setSalePendingReceipt(null);
                           (window as any).__receiptFile = null;
