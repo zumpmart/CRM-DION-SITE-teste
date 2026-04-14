@@ -520,7 +520,7 @@ export default function App() {
       unsubProfiles = onSnapshot(collection(db, 'profiles'), (snapshot) => {
         setUsers(snapshot.docs.map(doc => ({ ...(doc.data() as UserProfile), id: doc.id })));
       }, (error) => handleSyncError(error, 'Perfis'));
-      unsubLogs = onSnapshot(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(100)), (snapshot) => {
+      unsubLogs = onSnapshot(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(500)), (snapshot) => {
         setLogs(snapshot.docs.map(doc => ({ ...(doc.data() as AuditLog), id: doc.id })));
       }, (error) => handleSyncError(error, 'Logs'));
       unsubPayments = onSnapshot(query(collection(db, 'payments'), orderBy('created_at', 'desc')), (snapshot) => {
@@ -626,6 +626,9 @@ export default function App() {
     setLoginError('');
   };
 
+  const MAX_LOGS = 500;
+  const logCounterRef = useRef(0);
+
   const addLog = async (user: UserProfile, action: string, targetId?: string) => {
     try {
       await addDoc(collection(db, 'audit_logs'), {
@@ -635,6 +638,22 @@ export default function App() {
         target_id: targetId || null,
         created_at: new Date().toISOString()
       });
+      // Auto-cleanup: check every 50 logs to avoid excessive Firestore reads
+      logCounterRef.current++;
+      if (logCounterRef.current >= 50) {
+        logCounterRef.current = 0;
+        try {
+          const countSnap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc')));
+          if (countSnap.size > MAX_LOGS) {
+            const toDelete = countSnap.docs.slice(MAX_LOGS);
+            for (const d of toDelete) {
+              await deleteDoc(doc(db, 'audit_logs', d.id));
+            }
+          }
+        } catch (cleanupErr) {
+          console.warn('Auto-cleanup logs failed:', cleanupErr);
+        }
+      }
     } catch (error) {
       console.error('Error adding log:', error);
     }
