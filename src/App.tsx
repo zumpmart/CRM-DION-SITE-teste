@@ -1168,9 +1168,11 @@ export default function App() {
         finalUpdates.receipt_rejection_reason = null;
       }
 
+      // Only update updated_at if status changed (to preserve position in flow)
+      const statusChanged = sale && updatedData.status !== sale.status;
       await updateDoc(doc(db, 'sales', saleId), {
         ...finalUpdates,
-        updated_at: new Date().toISOString()
+        ...(statusChanged ? { updated_at: new Date().toISOString() } : {})
       });
 
       if (newReceipt) {
@@ -5660,6 +5662,7 @@ export default function App() {
                     />
                   </div>
 
+                  {editingSale.status === SaleStatus.PAGO && (
                   <div className="space-y-2">
                     <label className="text-sm font-semibold text-zinc-700">
                       {editingSale.receipt_id ? 'Alterar Comprovante' : 'Adicionar Comprovante'}
@@ -5679,6 +5682,7 @@ export default function App() {
                       <p className="text-[10px] text-amber-600 font-medium">Já existe um comprovante. Ao enviar um novo, ele será substituído.</p>
                     )}
                   </div>
+                  )}
 
                   <div className="pt-4 flex flex-col gap-3">
                     <div className="flex gap-3">
