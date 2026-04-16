@@ -1204,6 +1204,8 @@ export default function App() {
     e.preventDefault();
     const saleId = e.dataTransfer.getData('saleId');
     if (saleId) {
+      const sale = sales.find(s => s.id === saleId);
+      if (sale && sale.status === newStatus) return; // Same column, ignore
       await handleUpdateStatus(saleId, newStatus);
     }
   };
