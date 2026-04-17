@@ -4619,12 +4619,12 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-black/5">
-                          {payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).length === 0 ? (
+                          {payments.length === 0 ? (
                             <tr>
-                              <td colSpan={4} className="px-6 py-8 text-center text-zinc-400">Nenhum pagamento registrado no período.</td>
+                              <td colSpan={4} className="px-6 py-8 text-center text-zinc-400">Nenhum pagamento registrado.</td>
                             </tr>
                           ) : (
-                            payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).map(payment => {
+                            payments.map(payment => {
                               const seller = users.find(u => u.id === payment.vendedor_id);
                               return (
                                 <tr key={payment.id} className="hover:bg-zinc-50 transition-all">
