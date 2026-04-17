@@ -4078,7 +4078,7 @@ export default function App() {
                               receipt.audit_status === 'divergent' ? 'bg-amber-50/50' :
                               receipt.audit_status === 'duplicate' ? 'bg-red-50/50' : ''
                             }`}>
-                              <td className="px-4 py-3 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleDateString()}</td>
+                              <td className="px-4 py-3 text-sm text-zinc-500">{new Date(receipt.created_at).toLocaleString()}</td>
                               <td className="px-4 py-3 text-sm font-medium text-zinc-900">{users.find(u => u.id === receipt.vendedor_id)?.name}</td>
                               <td className="px-4 py-3 text-sm text-zinc-700">
                                 {(() => {
