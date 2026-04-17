@@ -301,6 +301,7 @@ export default function App() {
   const [receiptDateFrom, setReceiptDateFrom] = useState<string>('');
   const [receiptDateTo, setReceiptDateTo] = useState<string>('');
   const [receiptVendorFilter, setReceiptVendorFilter] = useState<string>('');
+  const [receiptPage, setReceiptPage] = useState(1);
   const [paymentDateFrom, setPaymentDateFrom] = useState<string>('');
   const [paymentDateTo, setPaymentDateTo] = useState<string>('');
   const [paymentStatusFilter, setPaymentStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
@@ -3998,7 +3999,7 @@ export default function App() {
                             <input
                               type="date"
                               value={receiptDateFrom}
-                              onChange={(e) => setReceiptDateFrom(e.target.value)}
+                              onChange={(e) => { setReceiptDateFrom(e.target.value); setReceiptPage(1); }}
                               className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"
                               title="Data início"
                             />
@@ -4006,7 +4007,7 @@ export default function App() {
                             <input
                               type="date"
                               value={receiptDateTo}
-                              onChange={(e) => setReceiptDateTo(e.target.value)}
+                              onChange={(e) => { setReceiptDateTo(e.target.value); setReceiptPage(1); }}
                               className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"
                               title="Data fim"
                             />
@@ -4017,7 +4018,7 @@ export default function App() {
                           {(currentUser.role === UserRole.ADMIN) && (
                             <select
                               value={receiptVendorFilter}
-                              onChange={(e) => setReceiptVendorFilter(e.target.value)}
+                              onChange={(e) => { setReceiptVendorFilter(e.target.value); setReceiptPage(1); }}
                               className="text-xs border border-zinc-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none min-w-[140px]"
                             >
                               <option value="">Todos os vendedores</option>
@@ -4038,7 +4039,7 @@ export default function App() {
                         ].map(f => (
                           <button
                             key={f.key}
-                            onClick={() => setReceiptAuditFilter(f.key)}
+                            onClick={() => { setReceiptAuditFilter(f.key); setReceiptPage(1); }}
                             className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all ${
                               receiptAuditFilter === f.key
                                 ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100'
@@ -4073,7 +4074,12 @@ export default function App() {
                                 Nenhum comprovante encontrado para este filtro
                               </td>
                             </tr>
-                          ) : filteredReceipts.map((receipt) => (
+                          ) : (() => {
+                            const RECEIPTS_PER_PAGE = 50;
+                            const totalPages = Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE);
+                            const safePage = Math.min(receiptPage, totalPages || 1);
+                            const paginatedReceipts = filteredReceipts.slice((safePage - 1) * RECEIPTS_PER_PAGE, safePage * RECEIPTS_PER_PAGE);
+                            return paginatedReceipts.map((receipt) => (
                             <tr key={receipt.id} className={`hover:bg-zinc-50 transition-all ${
                               receipt.audit_status === 'divergent' ? 'bg-amber-50/50' :
                               receipt.audit_status === 'duplicate' ? 'bg-red-50/50' : ''
@@ -4197,10 +4203,35 @@ export default function App() {
                                 </td>
                               )}
                             </tr>
-                          ))}
+                          ));
+                          })()}
                         </tbody>
                       </table>
                     </div>
+                    {/* Pagination */}
+                    {(() => {
+                      const RECEIPTS_PER_PAGE = 50;
+                      const totalPages = Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE);
+                      if (totalPages <= 1) return null;
+                      const safePage = Math.min(receiptPage, totalPages || 1);
+                      return (
+                        <div className="p-4 border-t border-black/5 flex items-center justify-between">
+                          <span className="text-sm text-zinc-500">{filteredReceipts.length} comprovante(s) • Página {safePage} de {totalPages}</span>
+                          <div className="flex gap-2">
+                            <button
+                              disabled={safePage <= 1}
+                              onClick={() => setReceiptPage(p => Math.max(1, p - 1))}
+                              className="px-4 py-2 rounded-xl text-sm font-bold border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                            >← Anterior</button>
+                            <button
+                              disabled={safePage >= totalPages}
+                              onClick={() => setReceiptPage(p => p + 1)}
+                              className="px-4 py-2 rounded-xl text-sm font-bold border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                            >Próxima →</button>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
                 );
