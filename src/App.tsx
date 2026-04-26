@@ -3663,9 +3663,6 @@ export default function App() {
                             if (sale.status === SaleStatus.PAGO && !isPagoVisibleInFlow(sale as Sale) && !receipts.some(r => r.sale_id === sale.id && (r.audit_status === 'divergent' || r.audit_status === 'error' || r.audit_status === 'duplicate'))) return false;
                             return true;
                           }).sort((a, b) => {
-                            const aPriority = (isPriorityAguardando(a as Sale) || isStalePendente(a as Sale)) ? 1 : 0;
-                            const bPriority = (isPriorityAguardando(b as Sale) || isStalePendente(b as Sale)) ? 1 : 0;
-                            if (aPriority !== bPriority) return bPriority - aPriority;
                             return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
                           }).map((sale) => (
                             <tr key={sale.id} className={`hover:bg-zinc-50 transition-all ${isStaleAguardando(sale as Sale) ? 'bg-red-50/40' : isStalePendente(sale as Sale) ? 'bg-amber-50/40' : ''}`}>
@@ -3847,9 +3844,6 @@ export default function App() {
                             
                             return true;
                           }).sort((a, b) => {
-                            const aPriority = (isPriorityAguardando(a) || isStalePendente(a)) ? 1 : 0;
-                            const bPriority = (isPriorityAguardando(b) || isStalePendente(b)) ? 1 : 0;
-                            if (aPriority !== bPriority) return bPriority - aPriority;
                             return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
                           });
 
