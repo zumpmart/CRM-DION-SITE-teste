@@ -2185,10 +2185,10 @@ export default function App() {
           </div>
         </header>
 
-        {/* Cleanup Reminder Banner (every 15 days) */}
+        {/* Cleanup Reminder Banner (every 7 days) */}
         {currentUser.role === UserRole.ADMIN && currentPage === 'dashboard' && (() => {
           const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
-          return daysSince >= 15 ? (
+          return daysSince >= 7 ? (
             <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mx-4 mt-2 rounded-md shadow-sm flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Clock className="w-4 h-4 text-amber-600" />
@@ -4426,15 +4426,15 @@ export default function App() {
                       </button>
                       <button 
                         onClick={() => {
-                          const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+                          const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
                           const oldReceipts = receipts.filter(r => r.created_at < cutoff);
                           if (oldReceipts.length === 0) {
-                            showToast('Nenhum comprovante com +15 dias.', 'info');
+                            showToast('Nenhum comprovante com +7 dias.', 'info');
                             return;
                           }
                           setConfirmModal({
                             title: '🧹 Limpar Comprovantes Antigos',
-                            message: `Apagar ${oldReceipts.length} comprovante(s) com mais de 15 dias? Esta ação não pode ser desfeita.`,
+                            message: `Apagar ${oldReceipts.length} comprovante(s) com mais de 7 dias? Esta ação não pode ser desfeita.`,
                             confirmText: 'Apagar Comprovantes',
                             onConfirm: async () => {
                               try {
@@ -4444,7 +4444,7 @@ export default function App() {
                                 const now = new Date().toISOString();
                                 await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now });
                                 setLastCleanupDate(now);
-                                await addLog(currentUser, `Limpou ${oldReceipts.length} comprovante(s) antigos (+15 dias)`);
+                                await addLog(currentUser, `Limpou ${oldReceipts.length} comprovante(s) antigos (+7 dias)`);
                                 showToast(`${oldReceipts.length} comprovante(s) antigos removidos!`, 'success');
                               } catch (err: any) {
                                 showToast('Erro: ' + err.message, 'error');
@@ -4454,16 +4454,16 @@ export default function App() {
                         }}
                         className="w-fit bg-red-600 text-white px-3 py-1.5 rounded-xl font-semibold hover:bg-red-700 transition-colors text-xs"
                       >
-                        🧹 Limpar Comprovantes +15 dias
+                        🧹 Limpar Comprovantes +7 dias
                       </button>
                       {(() => {
                         const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
-                        return daysSince >= 15 ? (
+                          return daysSince >= 7 ? (
                           <span className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-full animate-pulse">
                             ⚠️ Limpeza pendente ({daysSince === 999 ? 'nunca feita' : `${daysSince} dias`})
                           </span>
                         ) : (
-                          <span className="text-xs text-zinc-400">Próxima limpeza em {15 - daysSince} dia(s)</span>
+                          <span className="text-xs text-zinc-400">Próxima limpeza em {7 - daysSince} dia(s)</span>
                         );
                       })()}
                     </div>
