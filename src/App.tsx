@@ -728,7 +728,8 @@ export default function App() {
       // Search filter by phone
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
-        const matchPhone = sale.phone?.toLowerCase().includes(q);
+        const qDigits = searchQuery.replace(/\D/g, '');
+        const matchPhone = qDigits.length > 0 ? sale.phone?.replace(/\D/g, '').includes(qDigits) : sale.phone?.toLowerCase().includes(q);
         const matchName = sale.name?.toLowerCase().includes(q);
         if (!matchPhone && !matchName) return false;
       }
@@ -2619,7 +2620,7 @@ export default function App() {
                           const filteredCustomers = customers
                           .filter(c => {
                             // Text search filter
-                            const matchesSearch = !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.phone.includes(searchQuery.replace(/\D/g, ''));
+                            const matchesSearch = !searchQuery || c.name.toLowerCase().includes(searchQuery.toLowerCase()) || c.phone.replace(/\D/g, '').includes(searchQuery.replace(/\D/g, ''));
                             // Exclude soft-deleted
                             if (c.deleted_at && c.deleted_at.length > 0) return false;
                             // Vendor filter: check if any of the customer's sales belong to the selected vendor
