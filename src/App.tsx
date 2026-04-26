@@ -568,6 +568,33 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
+  // Auto-archive AGUARDANDO leads older than 60h
+  const AUTO_ARCHIVE_HOURS = 60;
+  useEffect(() => {
+    if (!currentUser || sales.length === 0) return;
+    const autoArchive = async () => {
+      const cutoff = AUTO_ARCHIVE_HOURS * 60 * 60 * 1000;
+      const staleLeads = sales.filter(s =>
+        s.status === SaleStatus.AGUARDANDO &&
+        (Date.now() - new Date(s.updated_at).getTime()) > cutoff
+      );
+      for (const sale of staleLeads) {
+        try {
+          await updateDoc(doc(db, 'sales', sale.id), {
+            status: SaleStatus.ARQUIVADO,
+            updated_at: new Date().toISOString()
+          });
+          await addLog(currentUser, `Lead ${sale.phone} arquivado automaticamente (${AUTO_ARCHIVE_HOURS}h sem atendimento)`, sale.id);
+        } catch (err) {
+          console.warn('Auto-archive failed for', sale.id, err);
+        }
+      }
+    };
+    autoArchive();
+    const interval = setInterval(autoArchive, 10 * 60 * 1000); // Check every 10 min
+    return () => clearInterval(interval);
+  }, [currentUser, sales]);
+
   // Block scroll wheel on number inputs
   useEffect(() => {
     const handler = (e: WheelEvent) => {
