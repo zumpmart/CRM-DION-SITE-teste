@@ -153,7 +153,7 @@ const STATUS_LABELS: Record<string, string> = {
 const getStatusLabel = (status: string) => STATUS_LABELS[status] || status;
 
 // Statuses hidden from Kanban/List columns
-const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING];
+const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING, SaleStatus.EXCLUSAO_SOLICITADA];
 
 // --- Stale AGUARDANDO detection (>8h) ---
 const STALE_HOURS = 8;
