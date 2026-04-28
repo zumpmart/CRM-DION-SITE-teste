@@ -3535,7 +3535,23 @@ export default function App() {
                 <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                     <div className="p-6 border-b border-black/5 flex flex-col gap-4">
                       <div className="flex justify-between items-center">
-                        <h3 className="font-bold text-zinc-900">Listagem de Vendas</h3>
+                        <div className="flex items-center gap-3">
+                          <h3 className="font-bold text-zinc-900">Listagem de Vendas</h3>
+                          <button
+                            onClick={() => setCurrentPage('new-lead')}
+                            className="px-3 py-1.5 bg-indigo-600 text-white rounded-xl text-xs font-bold hover:bg-indigo-700 transition-all flex items-center gap-1 shadow-sm"
+                          >
+                            <PlusCircle className="w-3.5 h-3.5" />
+                            Novo Lead
+                          </button>
+                          <button
+                            onClick={() => setCurrentPage('new-sale')}
+                            className="px-3 py-1.5 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 transition-all flex items-center gap-1 shadow-sm"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            Nova Venda
+                          </button>
+                        </div>
                         <div className="flex gap-2 items-center">
                           <div className="relative">
                             <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
