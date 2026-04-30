@@ -222,7 +222,7 @@ export default function App() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
   const [newLeadSaleType, setNewLeadSaleType] = useState<SaleType>(SaleType.PONTUAL);
-  const [newLeadServices, setNewLeadServices] = useState<string[]>([]);
+  const [newLeadServices, setNewLeadServices] = useState<string[]>(['Logotipo']);
   const toastIdRef = useRef(0);
 
   const showToast = useCallback((message: string, type: ToastType = 'info') => {
@@ -569,7 +569,7 @@ export default function App() {
   }, [currentUser]);
 
   // Auto-archive AGUARDANDO leads older than 60h
-  const AUTO_ARCHIVE_HOURS = 60;
+  const AUTO_ARCHIVE_HOURS = 80;
   useEffect(() => {
     if (!currentUser || sales.length === 0) return;
     const autoArchive = async () => {
@@ -3217,7 +3217,7 @@ export default function App() {
                       });
                       // Reset local states
                       setNewLeadSaleType(SaleType.PONTUAL);
-                      setNewLeadServices([]);
+                      setNewLeadServices(['Logotipo']);
                     }} className="space-y-6">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="space-y-2">
@@ -3291,7 +3291,7 @@ export default function App() {
 
                         <div className="space-y-2 md:col-span-2">
                           <label className="text-sm font-semibold text-zinc-700">Valor {newLeadSaleType === SaleType.RECORRENTE ? 'do Contrato (R$/ciclo)' : 'da Venda (R$)'}</label>
-                          <input name="value" type="number" step="0.01" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="0.00" />
+                          <input name="value" type="number" step="0.01" defaultValue="50" required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="0.00" />
                         </div>
                       </div>
                       <div className="space-y-2">
