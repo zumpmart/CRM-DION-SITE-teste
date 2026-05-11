@@ -224,6 +224,8 @@ export default function App() {
   const [newLeadSaleType, setNewLeadSaleType] = useState<SaleType>(SaleType.PONTUAL);
   const [newLeadServices, setNewLeadServices] = useState<string[]>(['Logotipo']);
   const toastIdRef = useRef(0);
+  const salesRef = useRef<Sale[]>([]);
+  useEffect(() => { salesRef.current = sales; }, [sales]);
 
   const showToast = useCallback((message: string, type: ToastType = 'info') => {
     const id = ++toastIdRef.current;
@@ -568,13 +570,14 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
-  // Auto-archive AGUARDANDO leads older than 60h
+  // Auto-archive AGUARDANDO leads older than 80h (uses ref to avoid cascade)
   const AUTO_ARCHIVE_HOURS = 80;
   useEffect(() => {
-    if (!currentUser || sales.length === 0) return;
+    if (!currentUser) return;
     const autoArchive = async () => {
+      if (salesRef.current.length === 0) return;
       const cutoff = AUTO_ARCHIVE_HOURS * 60 * 60 * 1000;
-      const staleLeads = sales.filter(s =>
+      const staleLeads = salesRef.current.filter(s =>
         s.status === SaleStatus.AGUARDANDO &&
         (Date.now() - new Date(s.updated_at).getTime()) > cutoff
       );
@@ -593,7 +596,7 @@ export default function App() {
     autoArchive();
     const interval = setInterval(autoArchive, 60 * 60 * 1000); // Check every 1 hour
     return () => clearInterval(interval);
-  }, [currentUser, sales]);
+  }, [currentUser]);
 
   // Block scroll wheel on number inputs
   useEffect(() => {
