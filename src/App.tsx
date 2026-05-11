@@ -53,7 +53,7 @@ import { UserProfile, UserRole, Sale, SaleStatus, SaleType, ContractStatus, Cust
 import { auditReceipt, generateImageHash } from './auditService';
 import { db, auth, storage, firebaseConfig } from './firebase';
 import { initializeApp } from 'firebase/app';
-import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, deleteField, query, where, orderBy, onSnapshot, limit, or } from 'firebase/firestore';
+import { collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, deleteField, query, where, orderBy, onSnapshot, limit, or, writeBatch } from 'firebase/firestore';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword, updatePassword, EmailAuthProvider, reauthenticateWithCredential, getAuth as getSecondaryAuth } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
@@ -667,8 +667,10 @@ export default function App() {
         const snap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(MAX_LOGS + 100)));
         if (snap.size > MAX_LOGS) {
           const toDelete = snap.docs.slice(MAX_LOGS);
-          for (const d of toDelete) {
-            await deleteDoc(doc(db, 'audit_logs', d.id));
+          for (let i = 0; i < toDelete.length; i += 500) {
+            const batch = writeBatch(db);
+            toDelete.slice(i, i + 500).forEach(d => batch.delete(doc(db, 'audit_logs', d.id)));
+            await batch.commit();
           }
           console.log(`Auto-cleanup: removed ${toDelete.length} old logs`);
         }
@@ -4434,7 +4436,11 @@ export default function App() {
                             onConfirm: async () => {
                               try {
                                 const logsSnap = await getDocs(collection(db, 'audit_logs'));
-                                for (const d of logsSnap.docs) await deleteDoc(doc(db, 'audit_logs', d.id));
+                                for (let i = 0; i < logsSnap.docs.length; i += 500) {
+                                  const batch = writeBatch(db);
+                                  logsSnap.docs.slice(i, i + 500).forEach(d => batch.delete(doc(db, 'audit_logs', d.id)));
+                                  await batch.commit();
+                                }
                                 showToast(`${logsSnap.size} log(s) apagados!`, 'success');
                               } catch (err: any) {
                                 showToast('Erro: ' + err.message, 'error');
@@ -4460,8 +4466,10 @@ export default function App() {
                             confirmText: 'Apagar Comprovantes',
                             onConfirm: async () => {
                               try {
-                                for (const r of oldReceipts) {
-                                  await deleteDoc(doc(db, 'receipts', r.id));
+                                for (let i = 0; i < oldReceipts.length; i += 500) {
+                                  const batch = writeBatch(db);
+                                  oldReceipts.slice(i, i + 500).forEach(r => batch.delete(doc(db, 'receipts', r.id)));
+                                  await batch.commit();
                                 }
                                 const now = new Date().toISOString();
                                 await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now });
