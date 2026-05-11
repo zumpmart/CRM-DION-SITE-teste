@@ -658,7 +658,26 @@ export default function App() {
   };
 
   const MAX_LOGS = 500;
-  const logCounterRef = useRef(0);
+
+  // Auto-cleanup logs on admin login (runs once)
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== UserRole.ADMIN) return;
+    const cleanupLogs = async () => {
+      try {
+        const snap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(MAX_LOGS + 100)));
+        if (snap.size > MAX_LOGS) {
+          const toDelete = snap.docs.slice(MAX_LOGS);
+          for (const d of toDelete) {
+            await deleteDoc(doc(db, 'audit_logs', d.id));
+          }
+          console.log(`Auto-cleanup: removed ${toDelete.length} old logs`);
+        }
+      } catch (err) {
+        console.warn('Auto-cleanup logs failed:', err);
+      }
+    };
+    cleanupLogs();
+  }, [currentUser]);
 
   const addLog = async (user: UserProfile, action: string, targetId?: string) => {
     try {
@@ -669,22 +688,6 @@ export default function App() {
         target_id: targetId || null,
         created_at: new Date().toISOString()
       });
-      // Auto-cleanup: check every 50 logs using limit to avoid reading all docs
-      logCounterRef.current++;
-      if (logCounterRef.current >= 50) {
-        logCounterRef.current = 0;
-        try {
-          const countSnap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(MAX_LOGS + 1)));
-          if (countSnap.size > MAX_LOGS) {
-            const toDelete = countSnap.docs.slice(MAX_LOGS);
-            for (const d of toDelete) {
-              await deleteDoc(doc(db, 'audit_logs', d.id));
-            }
-          }
-        } catch (cleanupErr) {
-          console.warn('Auto-cleanup logs failed:', cleanupErr);
-        }
-      }
     } catch (error) {
       console.error('Error adding log:', error);
     }
