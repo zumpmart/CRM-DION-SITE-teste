@@ -557,14 +557,14 @@ export default function App() {
     return () => unsubCustomers();
   }, [currentUser]);
 
-  // Online presence heartbeat (updates last_seen every 60s)
+  // Online presence heartbeat (updates last_seen every 5min)
   useEffect(() => {
     if (!currentUser) return;
     const updatePresence = () => {
       updateDoc(doc(db, 'profiles', currentUser.id), { last_seen: new Date().toISOString() }).catch(() => {});
     };
     updatePresence();
-    const interval = setInterval(updatePresence, 60000);
+    const interval = setInterval(updatePresence, 300000);
     return () => clearInterval(interval);
   }, [currentUser]);
 
@@ -591,7 +591,7 @@ export default function App() {
       }
     };
     autoArchive();
-    const interval = setInterval(autoArchive, 10 * 60 * 1000); // Check every 10 min
+    const interval = setInterval(autoArchive, 60 * 60 * 1000); // Check every 1 hour
     return () => clearInterval(interval);
   }, [currentUser, sales]);
 
@@ -666,12 +666,12 @@ export default function App() {
         target_id: targetId || null,
         created_at: new Date().toISOString()
       });
-      // Auto-cleanup: check every 50 logs to avoid excessive Firestore reads
+      // Auto-cleanup: check every 50 logs using limit to avoid reading all docs
       logCounterRef.current++;
       if (logCounterRef.current >= 50) {
         logCounterRef.current = 0;
         try {
-          const countSnap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc')));
+          const countSnap = await getDocs(query(collection(db, 'audit_logs'), orderBy('created_at', 'desc'), limit(MAX_LOGS + 1)));
           if (countSnap.size > MAX_LOGS) {
             const toDelete = countSnap.docs.slice(MAX_LOGS);
             for (const d of toDelete) {
