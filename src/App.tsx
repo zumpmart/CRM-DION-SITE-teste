@@ -681,6 +681,27 @@ export default function App() {
     cleanupLogs();
   }, [currentUser]);
 
+  // One-time migration: backfill paid_at for PAGO sales that don't have it
+  useEffect(() => {
+    if (!currentUser) return;
+    const backfillPaidAt = async () => {
+      const needsFix = salesRef.current.filter(s => s.status === SaleStatus.PAGO && !s.paid_at);
+      for (const sale of needsFix) {
+        try {
+          await updateDoc(doc(db, 'sales', sale.id), {
+            paid_at: sale.updated_at || sale.created_at
+          });
+          console.log(`Backfilled paid_at for sale ${sale.id}`);
+        } catch (err) {
+          console.warn('Backfill paid_at failed:', err);
+        }
+      }
+    };
+    // Delay to let sales load first
+    const timeout = setTimeout(backfillPaidAt, 5000);
+    return () => clearTimeout(timeout);
+  }, [currentUser]);
+
   const addLog = async (user: UserProfile, action: string, targetId?: string) => {
     try {
       await addDoc(collection(db, 'audit_logs'), {
@@ -913,7 +934,7 @@ export default function App() {
       conversionRate,
       goalProgress: currentUser?.daily_goal ? (dailyTotal / currentUser.daily_goal) * 100 : 0
     };
-  }, [mySales, sales, currentUser, dateRange, dashboardVendorFilter]);
+  }, [mySales, sales, currentUser, dateRange, dashboardVendorFilter, isSaleRevenueApproved, customers, receipts]);
 
   const adminGoalTracking = useMemo(() => {
     if (!currentUser) return [];
