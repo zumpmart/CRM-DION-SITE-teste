@@ -44,7 +44,8 @@ import {
   Plus,
   Eye,
   Wallet,
-  Lock
+  Lock,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper from 'react-easy-crop';
@@ -307,6 +308,7 @@ export default function App() {
   const [paymentDateFrom, setPaymentDateFrom] = useState<string>('');
   const [paymentDateTo, setPaymentDateTo] = useState<string>('');
   const [paymentStatusFilter, setPaymentStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
+  const [showPendingCommissions, setShowPendingCommissions] = useState(false);
   const [expandedVendors, setExpandedVendors] = useState<Record<string, boolean>>({});
   const [receiptsLastSeen, setReceiptsLastSeen] = useState<string>(() => localStorage.getItem('receiptsLastSeen') || '');
 
@@ -5174,10 +5176,21 @@ export default function App() {
                   {/* Pending Commissions Detail */}
                   {unpaidCommissionSales.length > 0 && (
                     <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
-                      <div className="p-6 border-b border-black/5">
-                        <h3 className="font-bold text-zinc-900 text-lg">Vendas Pendentes de Receber</h3>
-                        <p className="text-xs text-zinc-400 mt-1">Comissões que ainda não foram pagas pelo Admin</p>
-                      </div>
+                      <button 
+                        type="button"
+                        onClick={() => setShowPendingCommissions(prev => !prev)}
+                        className="w-full p-6 border-b border-black/5 flex items-center justify-between hover:bg-zinc-50 transition-colors cursor-pointer"
+                      >
+                        <div>
+                          <h3 className="font-bold text-zinc-900 text-lg text-left">Vendas Pendentes de Receber</h3>
+                          <p className="text-xs text-zinc-400 mt-1 text-left">Comissões que ainda não foram pagas pelo Admin</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-xs font-bold">{unpaidCommissionSales.length} venda(s)</span>
+                          <ChevronDown className={`w-5 h-5 text-zinc-400 transition-transform ${showPendingCommissions ? 'rotate-180' : ''}`} />
+                        </div>
+                      </button>
+                      {showPendingCommissions && (
                       <div className="overflow-x-auto">
                         <table className="w-full text-left">
                           <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
@@ -5220,6 +5233,7 @@ export default function App() {
                           </tfoot>
                         </table>
                       </div>
+                      )}
                     </div>
                   )}
 
