@@ -309,6 +309,7 @@ export default function App() {
   const [paymentDateTo, setPaymentDateTo] = useState<string>('');
   const [paymentStatusFilter, setPaymentStatusFilter] = useState<'all' | 'paid' | 'pending'>('all');
   const [showPendingCommissions, setShowPendingCommissions] = useState(false);
+  const [paymentPage, setPaymentPage] = useState(1);
   const [expandedVendors, setExpandedVendors] = useState<Record<string, boolean>>({});
   const [receiptsLastSeen, setReceiptsLastSeen] = useState<string>(() => localStorage.getItem('receiptsLastSeen') || '');
 
@@ -4731,50 +4732,81 @@ export default function App() {
                   })()}
 
                   {/* Payment History */}
-                  <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
-                    <div className="p-6 border-b border-black/5">
-                      <h3 className="font-bold text-zinc-900 text-lg">Histórico de Pagamentos</h3>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left">
-                        <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
-                          <tr>
-                            <th className="px-6 py-4 font-semibold">Data</th>
-                            <th className="px-6 py-4 font-semibold">Vendedor</th>
-                            <th className="px-6 py-4 font-semibold">Valor Pago</th>
-                            <th className="px-6 py-4 font-semibold">Comprovante</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-black/5">
-                          {payments.length === 0 ? (
+                  {(() => {
+                    const perPage = 10;
+                    const totalPages = Math.max(1, Math.ceil(payments.length / perPage));
+                    const currentPayPage = Math.min(paymentPage || 1, totalPages);
+                    const paginatedPayments = payments.slice((currentPayPage - 1) * perPage, currentPayPage * perPage);
+
+                    return (
+                    <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                      <div className="p-6 border-b border-black/5 flex justify-between items-center">
+                        <div>
+                          <h3 className="font-bold text-zinc-900 text-lg">Histórico de Pagamentos</h3>
+                          <p className="text-xs text-zinc-400 mt-1">{payments.length} pagamento(s) registrado(s)</p>
+                        </div>
+                        {totalPages > 1 && (
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setPaymentPage(Math.max(1, currentPayPage - 1))}
+                              disabled={currentPayPage === 1}
+                              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                            >
+                              ← Anterior
+                            </button>
+                            <span className="text-xs font-bold text-zinc-500">{currentPayPage} / {totalPages}</span>
+                            <button
+                              onClick={() => setPaymentPage(Math.min(totalPages, currentPayPage + 1))}
+                              disabled={currentPayPage === totalPages}
+                              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                            >
+                              Próxima →
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                          <thead className="bg-zinc-50 text-zinc-500 text-xs uppercase tracking-wider">
                             <tr>
-                              <td colSpan={4} className="px-6 py-8 text-center text-zinc-400">Nenhum pagamento registrado.</td>
+                              <th className="px-6 py-4 font-semibold">Data</th>
+                              <th className="px-6 py-4 font-semibold">Vendedor</th>
+                              <th className="px-6 py-4 font-semibold">Valor Pago</th>
+                              <th className="px-6 py-4 font-semibold">Comprovante</th>
                             </tr>
-                          ) : (
-                            payments.map(payment => {
-                              const seller = users.find(u => u.id === payment.vendedor_id);
-                              return (
-                                <tr key={payment.id} className="hover:bg-zinc-50 transition-all">
-                                  <td className="px-6 py-4 text-sm text-zinc-600">{new Date(payment.created_at).toLocaleString()}</td>
-                                  <td className="px-6 py-4 font-bold text-zinc-900">{seller?.name || 'Vendedor Removido'}</td>
-                                  <td className="px-6 py-4 font-bold text-emerald-600">R$ {payment.amount.toLocaleString()}</td>
-                                  <td className="px-6 py-4">
-                                    {payment.receipt_url ? (
-                                      <button onClick={() => setViewingImageUrl(payment.receipt_url!)} className="text-xs font-bold text-indigo-600 hover:underline flex items-center gap-1">
-                                        <FileText className="w-4 h-4" /> Ver Comprovante
-                                      </button>
-                                    ) : (
-                                      <span className="text-xs text-zinc-400">Sem comprovante</span>
-                                    )}
-                                  </td>
-                                </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody className="divide-y divide-black/5">
+                            {payments.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} className="px-6 py-8 text-center text-zinc-400">Nenhum pagamento registrado.</td>
+                              </tr>
+                            ) : (
+                              paginatedPayments.map(payment => {
+                                const seller = users.find(u => u.id === payment.vendedor_id);
+                                return (
+                                  <tr key={payment.id} className="hover:bg-zinc-50 transition-all">
+                                    <td className="px-6 py-4 text-sm text-zinc-600">{new Date(payment.created_at).toLocaleString()}</td>
+                                    <td className="px-6 py-4 font-bold text-zinc-900">{seller?.name || 'Vendedor Removido'}</td>
+                                    <td className="px-6 py-4 font-bold text-emerald-600">R$ {payment.amount.toLocaleString()}</td>
+                                    <td className="px-6 py-4">
+                                      {payment.receipt_url ? (
+                                        <button onClick={() => setViewingImageUrl(payment.receipt_url!)} className="text-xs font-bold text-indigo-600 hover:underline flex items-center gap-1">
+                                          <FileText className="w-4 h-4" /> Ver Comprovante
+                                        </button>
+                                      ) : (
+                                        <span className="text-xs text-zinc-400">Sem comprovante</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  </div>
+                    );
+                  })()}
                 </div>
               )}
 
