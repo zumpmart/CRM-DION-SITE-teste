@@ -4678,6 +4678,58 @@ export default function App() {
                     );
                   })()}
 
+                  {/* Total Paid per Vendor */}
+                  {payments.length > 0 && (() => {
+                    const paidByVendor = payments
+                      .filter(p => p.status === 'paid')
+                      .reduce((acc, p) => {
+                        if (!acc[p.vendedor_id]) acc[p.vendedor_id] = { count: 0, total: 0 };
+                        acc[p.vendedor_id].count++;
+                        acc[p.vendedor_id].total += p.amount;
+                        return acc;
+                      }, {} as Record<string, { count: number; total: number }>);
+
+                    const entries = Object.entries(paidByVendor)
+                      .map(([id, data]) => ({ id, name: users.find(u => u.id === id)?.name || 'Vendedor Removido', photo_url: users.find(u => u.id === id)?.photo_url, ...data }))
+                      .sort((a, b) => b.total - a.total);
+
+                    if (entries.length === 0) return null;
+
+                    return (
+                      <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
+                        <div className="p-6 border-b border-black/5 flex justify-between items-center">
+                          <div>
+                            <h3 className="font-bold text-zinc-900 text-lg">Total Pago por Vendedor</h3>
+                            <p className="text-xs text-zinc-400 mt-1">Resumo de comissões já pagas a cada vendedor</p>
+                          </div>
+                          <span className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-full text-sm font-black">
+                            R$ {entries.reduce((acc, e) => acc + e.total, 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="divide-y divide-black/5">
+                          {entries.map((entry, i) => (
+                            <div key={entry.id} className="flex items-center justify-between p-4 hover:bg-zinc-50 transition-colors">
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 bg-zinc-100 rounded-xl flex items-center justify-center overflow-hidden shrink-0">
+                                  {entry.photo_url ? (
+                                    <img src={entry.photo_url} alt={entry.name} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <span className="text-lg font-black text-zinc-300">{i + 1}</span>
+                                  )}
+                                </div>
+                                <div>
+                                  <p className="font-bold text-zinc-900">{entry.name}</p>
+                                  <p className="text-xs text-zinc-400">{entry.count} pagamento{entry.count !== 1 ? 's' : ''} realizado{entry.count !== 1 ? 's' : ''}</p>
+                                </div>
+                              </div>
+                              <p className="font-black text-emerald-600 text-lg">R$ {entry.total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Payment History */}
                   <div className="bg-white rounded-3xl shadow-sm border border-black/5 overflow-hidden">
                     <div className="p-6 border-b border-black/5">
