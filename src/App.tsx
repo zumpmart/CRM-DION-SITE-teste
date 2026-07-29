@@ -6049,6 +6049,7 @@ export default function App() {
                 });
 
                 handleUpdateUser(editingSeller.id, {
+                  name: (formData.get('name') as string) || editingSeller.name,
                   daily_goal: Number(formData.get('daily_goal')),
                   commission: Number(formData.get('commission')),
                   recurring_commission: Number(formData.get('recurring_commission')),
@@ -6059,6 +6060,10 @@ export default function App() {
                 setEditingSeller(null);
               }} className="p-8 space-y-6 max-h-[80vh] overflow-y-auto">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-sm font-semibold text-zinc-700">Nome</label>
+                    <input name="name" type="text" defaultValue={editingSeller.name} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
+                  </div>
                   <div className="space-y-2">
                     <label className="text-sm font-semibold text-zinc-700">Meta Diária (R$)</label>
                     <input name="daily_goal" type="number" defaultValue={editingSeller.daily_goal || 0} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
