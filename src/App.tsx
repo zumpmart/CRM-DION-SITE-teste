@@ -194,16 +194,47 @@ const isPagoVisibleInFlow = (sale: Sale) => {
   return toLocalDateString(paidRef) >= getLocalISODate();
 };
 
-const calculateCommission = (sale: Sale, user?: UserProfile) => {
+const calculateCommission = (sale: Sale, user?: UserProfile, approvedSales?: Sale[]) => {
   if (!user) return 0;
+
+  // Determine effective commission rate
+  let rate = user.commission || 0;
+
+  // Check for accelerated commission after goal
+  if (
+    user.commission_after_goal &&
+    user.daily_goal &&
+    approvedSales &&
+    sale.paid_at &&
+    user.commission_after_goal_since &&
+    sale.paid_at >= user.commission_after_goal_since
+  ) {
+    const saleDay = toLocalDateString(sale.paid_at);
+    const sameDaySales = approvedSales
+      .filter(s => s.vendedor_id === user.id && s.paid_at && toLocalDateString(s.paid_at) === saleDay)
+      .sort((a, b) => (a.paid_at || '').localeCompare(b.paid_at || ''));
+
+    let cumulative = 0;
+    for (const s of sameDaySales) {
+      if (s.id === sale.id) {
+        // If cumulative BEFORE this sale >= goal, use accelerated rate
+        if (cumulative >= user.daily_goal) {
+          rate = user.commission_after_goal;
+        }
+        break;
+      }
+      cumulative += s.value;
+    }
+  }
+
   if (sale.sale_type === SaleType.RECORRENTE) {
-    const rate = user.recurring_commission || user.commission || 0;
-    return (sale.value * rate) / 100;
+    const recRate = user.recurring_commission || rate;
+    return (sale.value * recRate) / 100;
   }
   if (user.commissions && user.commissions[sale.service] !== undefined) {
     return user.commissions[sale.service];
   }
-  return (sale.value * (user.commission || 0)) / 100;
+  return (sale.value * rate) / 100;
 };
 
 // --- Main App ---
@@ -789,6 +820,7 @@ export default function App() {
     return saleReceipts.some(r => r.audit_status === 'approved');
   }, [receipts]);
 
+  const approvedSales = useMemo(() => sales.filter(s => isSaleRevenueApproved(s)), [sales, isSaleRevenueApproved]);
 
   const expiringContractsCount = useMemo(() => {
     if (!currentUser) return 0;
@@ -2391,6 +2423,15 @@ export default function App() {
                             current={stats.dailyTotal} 
                             target={currentUser.daily_goal || 0} 
                           />
+                          {stats.goalProgress >= 100 && currentUser.commission_after_goal ? (
+                            <div className="mt-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 rounded-2xl p-4 flex items-center gap-3 text-white shadow-lg shadow-orange-200 animate-pulse">
+                              <span className="text-2xl">🚀</span>
+                              <div>
+                                <p className="font-black text-sm">Comissão Acelerada Ativada!</p>
+                                <p className="text-xs opacity-90">Suas próximas vendas rendem <strong>{currentUser.commission_after_goal}%</strong> de comissão 🔥</p>
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                       )}
 
@@ -4572,7 +4613,7 @@ export default function App() {
                     <StatCard title="Total Vendido (Período)" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
                     <StatCard title="Comissões a Pagar" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && !s.commission_paid).reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
-                      return acc + calculateCommission(s, v);
+                      return acc + calculateCommission(s, v, approvedSales);
                     }, 0).toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
                     <StatCard title="Total Pago (Período)" value={`R$ ${payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).reduce((acc, p) => acc + p.amount, 0).toLocaleString()}`} icon={CheckCircle} color="bg-emerald-500" />
                   </div>
@@ -4591,7 +4632,7 @@ export default function App() {
 
                     const grandTotal = pendingSales.reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
-                      return acc + calculateCommission(s, v);
+                      return acc + calculateCommission(s, v, approvedSales);
                     }, 0);
 
                     return (
@@ -4608,7 +4649,7 @@ export default function App() {
                         <div className="p-4 space-y-3">
                           {(Object.entries(grouped) as [string, Sale[]][]).map(([vendedorId, vendorSales]) => {
                             const vendor = users.find(u => u.id === vendedorId);
-                            const vendorTotal = vendorSales.reduce((acc, s) => acc + calculateCommission(s, vendor), 0);
+                            const vendorTotal = vendorSales.reduce((acc, s) => acc + calculateCommission(s, vendor, approvedSales), 0);
                             const isExpanded = expandedVendors[vendedorId] || false;
 
                             return (
@@ -4653,7 +4694,7 @@ export default function App() {
                                       <tbody className="divide-y divide-zinc-100">
                                         {vendorSales.map(sale => {
                                           const rate = vendor?.commissions?.[sale.service] ?? vendor?.commission ?? 10;
-                                          const commission = calculateCommission(sale, vendor);
+                                          const commission = calculateCommission(sale, vendor, approvedSales);
                                           return (
                                             <tr key={sale.id} className="hover:bg-zinc-50 transition-colors text-sm">
                                               <td className="px-4 py-3 font-medium text-zinc-900">{sale.phone}</td>
@@ -5231,7 +5272,7 @@ export default function App() {
                 const paidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && s.commission_paid && isSaleRevenueApproved(s));
                 const unpaidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && !s.commission_paid && isSaleRevenueApproved(s));
                 const pendingAmount = unpaidCommissionSales.reduce((sum, s) => {
-                  return sum + calculateCommission(s, currentUser);
+                  return sum + calculateCommission(s, currentUser, approvedSales);
                 }, 0);
 
                 return (
@@ -5289,7 +5330,7 @@ export default function App() {
                           </thead>
                           <tbody className="divide-y divide-zinc-100">
                             {unpaidCommissionSales.map(sale => {
-                              const commission = calculateCommission(sale, currentUser);
+                              const commission = calculateCommission(sale, currentUser, approvedSales);
                               const rate = sale.sale_type === SaleType.RECORRENTE 
                                 ? (currentUser.recurring_commission || currentUser.commission || 0)
                                 : (currentUser.commissions?.[sale.service] !== undefined ? 'fixa' : (currentUser.commission ?? 10));
@@ -6053,6 +6094,10 @@ export default function App() {
                   daily_goal: Number(formData.get('daily_goal')),
                   commission: Number(formData.get('commission')),
                   recurring_commission: Number(formData.get('recurring_commission')),
+                  commission_after_goal: Number(formData.get('commission_after_goal')) || 0,
+                  commission_after_goal_since: Number(formData.get('commission_after_goal'))
+                    ? (editingSeller.commission_after_goal_since || new Date().toISOString())
+                    : '',
                   commissions,
                   pix_key: formData.get('pix_key') as string,
                   role: (formData.get('role') as UserRole) || editingSeller.role
@@ -6075,6 +6120,13 @@ export default function App() {
                   <div className="space-y-2">
                     <label className="text-sm font-semibold text-zinc-700">Comissão Recorrente (%)</label>
                     <input name="recurring_commission" type="number" defaultValue={editingSeller.recurring_commission || 0} required className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold text-zinc-700">Comissão após Meta Diária (%)</label>
+                    <input name="commission_after_goal" type="number" defaultValue={editingSeller.commission_after_goal || ''} className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-indigo-500/20 outline-none" placeholder="Deixe em branco se não usar" />
+                    {editingSeller.commission_after_goal_since && (
+                      <p className="text-[10px] text-zinc-400">Ativo desde {new Date(editingSeller.commission_after_goal_since).toLocaleDateString('pt-BR')}</p>
+                    )}
                   </div>
                   <div className="space-y-2 md:col-span-1">
                     <label className="text-sm font-semibold text-zinc-700">Chave PIX</label>
@@ -6151,7 +6203,7 @@ export default function App() {
                 <div className="text-center space-y-2">
                   <p className="text-sm text-zinc-500 font-medium">Valor a Pagar para <strong className="text-zinc-900">{payingSeller.name}</strong></p>
                   <p className="text-4xl font-black text-emerald-600">
-                    R$ {sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller), 0).toLocaleString()}
+                    R$ {sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller, approvedSales), 0).toLocaleString()}
                   </p>
                 </div>
                 
@@ -6176,7 +6228,7 @@ export default function App() {
                           <p className="text-sm font-bold text-zinc-900">{sale.phone}</p>
                           <p className="text-xs text-zinc-500">{sale.service} - {new Date(sale.paid_at || '').toLocaleDateString()}</p>
                         </div>
-                        <p className="text-sm font-bold text-emerald-600">R$ {calculateCommission(sale, payingSeller).toLocaleString()}</p>
+                        <p className="text-sm font-bold text-emerald-600">R$ {calculateCommission(sale, payingSeller, approvedSales).toLocaleString()}</p>
                       </label>
                     ))}
                   </div>
@@ -6234,7 +6286,7 @@ export default function App() {
                     Cancelar
                   </button>
                   <button 
-                    onClick={() => handlePayVendedor(payingSeller.id, sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller), 0))}
+                    onClick={() => handlePayVendedor(payingSeller.id, sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller, approvedSales), 0))}
                     disabled={selectedSalesToPay.length === 0 || isUploadingReceipt}
                     className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 disabled:opacity-50"
                   >

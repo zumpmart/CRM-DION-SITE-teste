@@ -61,6 +61,8 @@ export interface UserProfile {
   commissions?: Record<string, number>;
   last_seen?: string;
   recurring_commission?: number;
+  commission_after_goal?: number;
+  commission_after_goal_since?: string;
   pix_key?: string;
   photo_url?: string;
   status: "ATIVO" | "INATIVO";
