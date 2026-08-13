@@ -2466,9 +2466,14 @@ export default function App() {
                                   </div>
                                   {tracker.remaining > 0 ? (
                                     <p className="text-xs text-zinc-500">Faltam <strong className="text-amber-600">R$ {tracker.remaining.toLocaleString()}</strong></p>
-                                  ) : (
-                                    <p className="text-xs font-bold text-emerald-600">Meta Batida! 🎉</p>
-                                  )}
+                                  ) : (() => {
+                                    const u = users.find(x => x.id === tracker.id);
+                                    return u?.commission_after_goal ? (
+                                      <p className="text-xs font-bold text-orange-600">🚀 Comissão Acelerada ({u.commission_after_goal}%)</p>
+                                    ) : (
+                                      <p className="text-xs font-bold text-emerald-600">Meta Batida! 🎉</p>
+                                    );
+                                  })()}
                                 </div>
                                 <ProgressBar 
                                   label="" 
