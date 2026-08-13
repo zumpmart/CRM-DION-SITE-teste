@@ -4698,8 +4698,8 @@ export default function App() {
                                       </thead>
                                       <tbody className="divide-y divide-zinc-100">
                                         {vendorSales.map(sale => {
-                                          const rate = vendor?.commissions?.[sale.service] ?? vendor?.commission ?? 10;
                                           const commission = calculateCommission(sale, vendor, approvedSales);
+                                          const rate = sale.value > 0 ? Math.round((commission / sale.value) * 100) : 0;
                                           return (
                                             <tr key={sale.id} className="hover:bg-zinc-50 transition-colors text-sm">
                                               <td className="px-4 py-3 font-medium text-zinc-900">{sale.phone}</td>
@@ -5336,9 +5336,7 @@ export default function App() {
                           <tbody className="divide-y divide-zinc-100">
                             {unpaidCommissionSales.map(sale => {
                               const commission = calculateCommission(sale, currentUser, approvedSales);
-                              const rate = sale.sale_type === SaleType.RECORRENTE 
-                                ? (currentUser.recurring_commission || currentUser.commission || 0)
-                                : (currentUser.commissions?.[sale.service] !== undefined ? 'fixa' : (currentUser.commission ?? 10));
+                              const rate = sale.value > 0 ? Math.round((commission / sale.value) * 100) : 0;
                               return (
                                 <tr key={sale.id} className="hover:bg-zinc-50 transition-colors">
                                   <td className="px-6 py-4 text-sm text-zinc-500">{sale.paid_at ? new Date(sale.paid_at).toLocaleDateString('pt-BR') : '—'}</td>
