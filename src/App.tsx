@@ -301,6 +301,8 @@ export default function App() {
   const [customerDateTo, setCustomerDateTo] = useState<string>('');
   const [customerSortBy, setCustomerSortBy] = useState<'name' | 'spent_desc' | 'spent_asc' | 'purchases_desc' | 'purchases_asc' | 'recent'>('recent');
   const [customerPage, setCustomerPage] = useState(1);
+  const [orphanCustomers, setOrphanCustomers] = useState<{count: number; ids: string[]} | null>(null);
+  const [isDeletingOrphans, setIsDeletingOrphans] = useState(false);
   const [duplicateCustomerFound, setDuplicateCustomerFound] = useState<Customer | null>(null);
   const [pendingLeadData, setPendingLeadData] = useState<any>(null);
   const [newSaleSearchPhone, setNewSaleSearchPhone] = useState<string>('');
@@ -2652,6 +2654,66 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+                    {currentUser?.role === UserRole.ADMIN && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {orphanCustomers === null ? (
+                          <button
+                            onClick={() => {
+                              const customerIdsWithSales = new Set(sales.map(s => s.customer_id).filter(Boolean));
+                              const orphans = customers.filter(c => !c.deleted_at && !customerIdsWithSales.has(c.id));
+                              setOrphanCustomers({ count: orphans.length, ids: orphans.map(c => c.id) });
+                            }}
+                            className="px-4 py-2 bg-zinc-100 text-zinc-600 rounded-xl text-xs font-bold hover:bg-zinc-200 transition-colors flex items-center gap-1.5"
+                          >
+                            🔍 Analisar clientes sem vendas
+                          </button>
+                        ) : orphanCustomers.count === 0 ? (
+                          <div className="flex items-center gap-2">
+                            <span className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-xl text-xs font-bold">✅ Todos os clientes têm vendas!</span>
+                            <button onClick={() => setOrphanCustomers(null)} className="text-xs text-zinc-400 hover:text-zinc-600">✕</button>
+                          </div>
+                        ) : !isDeletingOrphans ? (
+                          <div className="flex items-center gap-2">
+                            <span className="px-4 py-2 bg-amber-100 text-amber-700 rounded-xl text-xs font-bold">
+                              ⚠️ {orphanCustomers.count} cliente(s) sem nenhuma venda
+                            </span>
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Tem certeza que deseja deletar ${orphanCustomers.count} clientes sem vendas? Esta ação não pode ser desfeita.`)) return;
+                                setIsDeletingOrphans(true);
+                                try {
+                                  let deleted = 0;
+                                  const batchSize = 400;
+                                  for (let i = 0; i < orphanCustomers.ids.length; i += batchSize) {
+                                    const batch = writeBatch(db);
+                                    const chunk = orphanCustomers.ids.slice(i, i + batchSize);
+                                    for (const id of chunk) {
+                                      batch.delete(doc(db, 'customers', id));
+                                    }
+                                    await batch.commit();
+                                    deleted += chunk.length;
+                                  }
+                                  await addLog(currentUser!, `Limpeza: ${deleted} clientes sem vendas removidos`, '');
+                                  setOrphanCustomers(null);
+                                  alert(`${deleted} clientes removidos com sucesso!`);
+                                } catch (err) {
+                                  console.error(err);
+                                  alert('Erro ao deletar. Tente novamente.');
+                                } finally {
+                                  setIsDeletingOrphans(false);
+                                }
+                              }}
+                              className="px-4 py-2 bg-red-100 text-red-600 rounded-xl text-xs font-bold hover:bg-red-200 transition-colors"
+                            >
+                              🧹 Limpar {orphanCustomers.count} clientes
+                            </button>
+                            <button onClick={() => setOrphanCustomers(null)} className="text-xs text-zinc-400 hover:text-zinc-600">✕</button>
+                          </div>
+                        ) : (
+                          <span className="px-4 py-2 bg-zinc-100 text-zinc-500 rounded-xl text-xs font-bold animate-pulse">⏳ Deletando...</span>
+                        )}
+                      </div>
+                    )}
                     <div className="flex gap-2 flex-wrap items-center">
                       <select 
                         value={customerVendorFilter}
