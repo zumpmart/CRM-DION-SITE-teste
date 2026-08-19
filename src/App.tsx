@@ -2659,8 +2659,10 @@ export default function App() {
                         {orphanCustomers === null ? (
                           <button
                             onClick={() => {
-                              const customerIdsWithSales = new Set(sales.map(s => s.customer_id).filter(Boolean));
-                              const orphans = customers.filter(c => !c.deleted_at && !customerIdsWithSales.has(c.id));
+                              const customerIdsWithPaidSales = new Set(
+                                sales.filter(s => s.status === SaleStatus.PAGO).map(s => s.customer_id).filter(Boolean)
+                              );
+                              const orphans = customers.filter(c => !c.deleted_at && !customerIdsWithPaidSales.has(c.id));
                               setOrphanCustomers({ count: orphans.length, ids: orphans.map(c => c.id) });
                             }}
                             className="px-4 py-2 bg-zinc-100 text-zinc-600 rounded-xl text-xs font-bold hover:bg-zinc-200 transition-colors flex items-center gap-1.5"
