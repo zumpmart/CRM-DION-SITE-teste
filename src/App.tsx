@@ -194,37 +194,15 @@ const isPagoVisibleInFlow = (sale: Sale) => {
   return toLocalDateString(paidRef) >= getLocalISODate();
 };
 
-const calculateCommission = (sale: Sale, user?: UserProfile, approvedSales?: Sale[]) => {
+const calculateCommission = (sale: Sale, user?: UserProfile, acceleratedSaleIds?: Set<string>) => {
   if (!user) return 0;
 
   // Determine effective commission rate
   let rate = user.commission || 0;
 
-  // Check for accelerated commission after goal
-  if (
-    user.commission_after_goal &&
-    user.daily_goal &&
-    approvedSales &&
-    sale.paid_at &&
-    user.commission_after_goal_since &&
-    sale.paid_at >= user.commission_after_goal_since
-  ) {
-    const saleDay = toLocalDateString(sale.paid_at);
-    const sameDaySales = approvedSales
-      .filter(s => s.vendedor_id === user.id && s.paid_at && toLocalDateString(s.paid_at) === saleDay)
-      .sort((a, b) => (a.paid_at || '').localeCompare(b.paid_at || ''));
-
-    let cumulative = 0;
-    for (const s of sameDaySales) {
-      if (s.id === sale.id) {
-        // If cumulative BEFORE this sale >= goal, use accelerated rate
-        if (cumulative >= user.daily_goal) {
-          rate = user.commission_after_goal;
-        }
-        break;
-      }
-      cumulative += s.value;
-    }
+  // Check if this sale is in the precomputed accelerated set
+  if (user.commission_after_goal && acceleratedSaleIds?.has(sale.id)) {
+    rate = user.commission_after_goal;
   }
 
   if (sale.sale_type === SaleType.RECORRENTE) {
@@ -820,7 +798,40 @@ export default function App() {
     return saleReceipts.some(r => r.audit_status === 'approved');
   }, [receipts]);
 
-  const approvedSales = useMemo(() => sales.filter(s => isSaleRevenueApproved(s)), [sales, isSaleRevenueApproved]);
+  const acceleratedSaleIds = useMemo(() => {
+    const ids = new Set<string>();
+    const approved = sales.filter(s => isSaleRevenueApproved(s));
+
+    // Group by vendedor+day, only for users with accelerated commission
+    const groups: Record<string, Sale[]> = {};
+    for (const s of approved) {
+      if (!s.paid_at) continue;
+      const vendor = users.find(u => u.id === s.vendedor_id);
+      if (!vendor?.commission_after_goal || !vendor.daily_goal || !vendor.commission_after_goal_since) continue;
+      if (s.paid_at < vendor.commission_after_goal_since) continue;
+
+      const key = `${s.vendedor_id}_${toLocalDateString(s.paid_at)}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(s);
+    }
+
+    // For each group, sort once and mark accelerated sales
+    for (const group of Object.values(groups)) {
+      group.sort((a, b) => (a.paid_at || '').localeCompare(b.paid_at || ''));
+      const vendor = users.find(u => u.id === group[0].vendedor_id);
+      if (!vendor?.daily_goal) continue;
+
+      let cumulative = 0;
+      for (const s of group) {
+        if (cumulative >= vendor.daily_goal) {
+          ids.add(s.id);
+        }
+        cumulative += s.value;
+      }
+    }
+
+    return ids;
+  }, [sales, users, isSaleRevenueApproved]);
 
   const expiringContractsCount = useMemo(() => {
     if (!currentUser) return 0;
@@ -4618,7 +4629,7 @@ export default function App() {
                     <StatCard title="Total Vendido (Período)" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
                     <StatCard title="Comissões a Pagar" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && !s.commission_paid).reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
-                      return acc + calculateCommission(s, v, approvedSales);
+                      return acc + calculateCommission(s, v, acceleratedSaleIds);
                     }, 0).toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
                     <StatCard title="Total Pago (Período)" value={`R$ ${payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).reduce((acc, p) => acc + p.amount, 0).toLocaleString()}`} icon={CheckCircle} color="bg-emerald-500" />
                   </div>
@@ -4637,7 +4648,7 @@ export default function App() {
 
                     const grandTotal = pendingSales.reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
-                      return acc + calculateCommission(s, v, approvedSales);
+                      return acc + calculateCommission(s, v, acceleratedSaleIds);
                     }, 0);
 
                     return (
@@ -4654,7 +4665,7 @@ export default function App() {
                         <div className="p-4 space-y-3">
                           {(Object.entries(grouped) as [string, Sale[]][]).map(([vendedorId, vendorSales]) => {
                             const vendor = users.find(u => u.id === vendedorId);
-                            const vendorTotal = vendorSales.reduce((acc, s) => acc + calculateCommission(s, vendor, approvedSales), 0);
+                            const vendorTotal = vendorSales.reduce((acc, s) => acc + calculateCommission(s, vendor, acceleratedSaleIds), 0);
                             const isExpanded = expandedVendors[vendedorId] || false;
 
                             return (
@@ -4698,7 +4709,7 @@ export default function App() {
                                       </thead>
                                       <tbody className="divide-y divide-zinc-100">
                                         {vendorSales.map(sale => {
-                                          const commission = calculateCommission(sale, vendor, approvedSales);
+                                          const commission = calculateCommission(sale, vendor, acceleratedSaleIds);
                                           const rate = sale.value > 0 ? Math.round((commission / sale.value) * 100) : 0;
                                           return (
                                             <tr key={sale.id} className="hover:bg-zinc-50 transition-colors text-sm">
@@ -5277,7 +5288,7 @@ export default function App() {
                 const paidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && s.commission_paid && isSaleRevenueApproved(s));
                 const unpaidCommissionSales = sales.filter(s => s.vendedor_id === currentUser.id && !s.commission_paid && isSaleRevenueApproved(s));
                 const pendingAmount = unpaidCommissionSales.reduce((sum, s) => {
-                  return sum + calculateCommission(s, currentUser, approvedSales);
+                  return sum + calculateCommission(s, currentUser, acceleratedSaleIds);
                 }, 0);
 
                 return (
@@ -5335,7 +5346,7 @@ export default function App() {
                           </thead>
                           <tbody className="divide-y divide-zinc-100">
                             {unpaidCommissionSales.map(sale => {
-                              const commission = calculateCommission(sale, currentUser, approvedSales);
+                              const commission = calculateCommission(sale, currentUser, acceleratedSaleIds);
                               const rate = sale.value > 0 ? Math.round((commission / sale.value) * 100) : 0;
                               return (
                                 <tr key={sale.id} className="hover:bg-zinc-50 transition-colors">
@@ -6206,7 +6217,7 @@ export default function App() {
                 <div className="text-center space-y-2">
                   <p className="text-sm text-zinc-500 font-medium">Valor a Pagar para <strong className="text-zinc-900">{payingSeller.name}</strong></p>
                   <p className="text-4xl font-black text-emerald-600">
-                    R$ {sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller, approvedSales), 0).toLocaleString()}
+                    R$ {sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller, acceleratedSaleIds), 0).toLocaleString()}
                   </p>
                 </div>
                 
@@ -6231,7 +6242,7 @@ export default function App() {
                           <p className="text-sm font-bold text-zinc-900">{sale.phone}</p>
                           <p className="text-xs text-zinc-500">{sale.service} - {new Date(sale.paid_at || '').toLocaleDateString()}</p>
                         </div>
-                        <p className="text-sm font-bold text-emerald-600">R$ {calculateCommission(sale, payingSeller, approvedSales).toLocaleString()}</p>
+                        <p className="text-sm font-bold text-emerald-600">R$ {calculateCommission(sale, payingSeller, acceleratedSaleIds).toLocaleString()}</p>
                       </label>
                     ))}
                   </div>
@@ -6289,7 +6300,7 @@ export default function App() {
                     Cancelar
                   </button>
                   <button 
-                    onClick={() => handlePayVendedor(payingSeller.id, sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller, approvedSales), 0))}
+                    onClick={() => handlePayVendedor(payingSeller.id, sales.filter(s => selectedSalesToPay.includes(s.id)).reduce((acc, s) => acc + calculateCommission(s, payingSeller, acceleratedSaleIds), 0))}
                     disabled={selectedSalesToPay.length === 0 || isUploadingReceipt}
                     className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 disabled:opacity-50"
                   >
