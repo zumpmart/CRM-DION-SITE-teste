@@ -150,11 +150,12 @@ const STATUS_LABELS: Record<string, string> = {
   [SaleStatus.ARQUIVADO]: 'ARQUIVADO',
   [SaleStatus.EXCLUSAO_SOLICITADA]: 'AGUARDANDO EXCLUSÃO',
   [SaleStatus.DELETED]: 'DELETED',
+  [SaleStatus.ESTORNADO]: 'ESTORNADO',
 };
 const getStatusLabel = (status: string) => STATUS_LABELS[status] || status;
 
 // Statuses hidden from Kanban/List columns
-const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING, SaleStatus.EXCLUSAO_SOLICITADA];
+const KANBAN_HIDDEN_STATUSES = [SaleStatus.DELETED, SaleStatus.CANCELADO, SaleStatus.REMARKETING, SaleStatus.EXCLUSAO_SOLICITADA, SaleStatus.ESTORNADO];
 
 // --- Stale AGUARDANDO detection (>8h) ---
 const STALE_HOURS = 8;
@@ -289,6 +290,10 @@ export default function App() {
   const [selectedSalesToPay, setSelectedSalesToPay] = useState<string[]>([]);
   const [paymentReceipt, setPaymentReceipt] = useState<File | null>(null);
   const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
+  const [refundingSeller, setRefundingSeller] = useState<UserProfile | null>(null);
+  const [selectedSalesToRefund, setSelectedSalesToRefund] = useState<string[]>([]);
+  const [refundReason, setRefundReason] = useState('');
+  const [isProcessingRefund, setIsProcessingRefund] = useState(false);
   const [financeiroTab, setFinanceiroTab] = useState<'pendentes' | 'historico'>('pendentes');
   const [cropModalOpen, setCropModalOpen] = useState(false);
   const [cropImageSrc, setCropImageSrc] = useState<string | null>(null);
@@ -4745,17 +4750,30 @@ export default function App() {
                                     <span className="font-black text-amber-600 text-sm">R$ {vendorTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
                                   </button>
                                   {vendor && (
-                                    <button
-                                      onClick={() => {
-                                        setPayingSeller(vendor);
-                                        setSelectedSalesToPay(vendorSales.map(s => s.id));
-                                        setPaymentReceipt(null);
-                                      }}
-                                      className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-colors flex items-center gap-1 shrink-0"
-                                    >
-                                      <DollarSign className="w-3.5 h-3.5" />
-                                      Pagar
-                                    </button>
+                                    <div className="flex gap-2 shrink-0">
+                                      <button
+                                        onClick={() => {
+                                          setPayingSeller(vendor);
+                                          setSelectedSalesToPay(vendorSales.map(s => s.id));
+                                          setPaymentReceipt(null);
+                                        }}
+                                        className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold hover:bg-emerald-100 transition-colors flex items-center gap-1"
+                                      >
+                                        <DollarSign className="w-3.5 h-3.5" />
+                                        Pagar
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          const paidSales = sales.filter(s => s.vendedor_id === vendor.id && s.status === SaleStatus.PAGO);
+                                          setRefundingSeller(vendor);
+                                          setSelectedSalesToRefund([]);
+                                          setRefundReason('');
+                                        }}
+                                        className="px-4 py-2 bg-red-50 text-red-500 rounded-xl text-xs font-bold hover:bg-red-100 transition-colors flex items-center gap-1"
+                                      >
+                                        ⤺ Estornar
+                                      </button>
+                                    </div>
                                   )}
                                 </div>
                                 {isExpanded && (
@@ -6369,6 +6387,127 @@ export default function App() {
                     className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 disabled:opacity-50"
                   >
                     {isUploadingReceipt ? 'Processando...' : 'Confirmar Pagamento'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {refundingSeller && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
+            >
+              <div className="p-6 border-b border-black/5 flex justify-between items-center bg-red-50 shrink-0">
+                <h3 className="text-xl font-bold text-red-700">⤺ Estornar Vendas</h3>
+                <button onClick={() => setRefundingSeller(null)} className="p-2 hover:bg-red-100 rounded-full transition-all">
+                  <X className="w-5 h-5 text-red-400" />
+                </button>
+              </div>
+              <div className="p-8 space-y-6 overflow-y-auto">
+                <div className="text-center space-y-2">
+                  <p className="text-sm text-zinc-500 font-medium">Estornando vendas de <strong className="text-zinc-900">{refundingSeller.name}</strong></p>
+                  <p className="text-4xl font-black text-red-600">
+                    {selectedSalesToRefund.length} venda{selectedSalesToRefund.length !== 1 ? 's' : ''}
+                  </p>
+                  <p className="text-sm text-zinc-400">
+                    Total: R$ {sales.filter(s => selectedSalesToRefund.includes(s.id)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}
+                  </p>
+                </div>
+                
+                <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-200 space-y-3">
+                  <p className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Selecione as vendas para estornar</p>
+                  <div className="max-h-48 overflow-y-auto space-y-2">
+                    {sales.filter(s => s.vendedor_id === refundingSeller.id && s.status === SaleStatus.PAGO).map(sale => (
+                      <label key={sale.id} className="flex items-center gap-3 p-2 hover:bg-zinc-100 rounded-lg cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={selectedSalesToRefund.includes(sale.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedSalesToRefund(prev => [...prev, sale.id]);
+                            } else {
+                              setSelectedSalesToRefund(prev => prev.filter(id => id !== sale.id));
+                            }
+                          }}
+                          className="w-4 h-4 text-red-600 rounded border-zinc-300 focus:ring-red-500"
+                        />
+                        <div className="flex-1">
+                          <p className="text-sm font-bold text-zinc-900">{sale.phone}</p>
+                          <p className="text-xs text-zinc-500">{sale.service} - {new Date(sale.paid_at || '').toLocaleDateString()}</p>
+                        </div>
+                        <p className="text-sm font-bold text-zinc-600">R$ {sale.value.toLocaleString()}</p>
+                      </label>
+                    ))}
+                    {sales.filter(s => s.vendedor_id === refundingSeller.id && s.status === SaleStatus.PAGO).length === 0 && (
+                      <p className="text-sm text-zinc-400 text-center py-4">Nenhuma venda paga para estornar</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-200 space-y-3">
+                  <p className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Motivo do Estorno *</p>
+                  <input
+                    type="text"
+                    value={refundReason}
+                    onChange={(e) => setRefundReason(e.target.value)}
+                    placeholder="Ex: Pix contestado, pagamento duplicado..."
+                    className="w-full px-4 py-3 rounded-xl border border-zinc-200 text-sm outline-none focus:ring-2 focus:ring-red-500/20"
+                  />
+                </div>
+
+                <div className="bg-red-50 p-4 rounded-2xl border border-red-200">
+                  <p className="text-xs text-red-600 font-medium">⚠️ As vendas estornadas deixarão de contar como receita e comissão. Esta ação pode ser revertida manualmente.</p>
+                </div>
+
+                <div className="flex gap-4 pt-4 shrink-0">
+                  <button 
+                    type="button" 
+                    onClick={() => setRefundingSeller(null)}
+                    className="flex-1 py-4 rounded-xl font-bold text-zinc-500 hover:bg-zinc-100 transition-all"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    onClick={async () => {
+                      if (!refundReason.trim()) {
+                        alert('Informe o motivo do estorno.');
+                        return;
+                      }
+                      if (!confirm(`Confirma o estorno de ${selectedSalesToRefund.length} venda(s)? O status será alterado para ESTORNADO.`)) return;
+                      setIsProcessingRefund(true);
+                      try {
+                        const batch = writeBatch(db);
+                        for (const saleId of selectedSalesToRefund) {
+                          batch.update(doc(db, 'sales', saleId), {
+                            status: SaleStatus.ESTORNADO,
+                            previous_status: SaleStatus.PAGO,
+                            refund_reason: refundReason.trim(),
+                            refunded_at: new Date().toISOString(),
+                            updated_at: new Date().toISOString(),
+                          });
+                        }
+                        await batch.commit();
+                        await addLog(currentUser!, `Estorno: ${selectedSalesToRefund.length} venda(s) de ${refundingSeller.name} — Motivo: ${refundReason.trim()}`, selectedSalesToRefund.join(', '));
+                        setRefundingSeller(null);
+                        showToast(`${selectedSalesToRefund.length} venda(s) estornada(s) com sucesso`, 'success');
+                      } catch (err) {
+                        console.error(err);
+                        alert('Erro ao processar estorno. Tente novamente.');
+                      } finally {
+                        setIsProcessingRefund(false);
+                      }
+                    }}
+                    disabled={selectedSalesToRefund.length === 0 || !refundReason.trim() || isProcessingRefund}
+                    className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-red-100 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isProcessingRefund ? 'Processando...' : `Confirmar Estorno (${selectedSalesToRefund.length})`}
                   </button>
                 </div>
               </div>

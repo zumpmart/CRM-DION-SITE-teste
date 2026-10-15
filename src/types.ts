@@ -13,6 +13,7 @@ export enum SaleStatus {
   ARQUIVADO = "ARQUIVADO",
   EXCLUSAO_SOLICITADA = "EXCLUSAO_SOLICITADA",
   DELETED = "DELETED",
+  ESTORNADO = "ESTORNADO",
 }
 
 export enum ReceiptStatus {
@@ -103,6 +104,8 @@ export interface Sale {
   receipt_rejection_reason?: string;
   deleted_at?: string;
   deleted_by?: string;
+  refund_reason?: string;
+  refunded_at?: string;
   notes?: string;
 }
 
