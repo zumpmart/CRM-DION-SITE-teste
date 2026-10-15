@@ -4818,6 +4818,79 @@ export default function App() {
                     );
                   })()}
 
+                  {/* Refunded Sales (last 24h) */}
+                  {(() => {
+                    const now = Date.now();
+                    const H24 = 24 * 60 * 60 * 1000;
+                    const recentRefunds = sales.filter(s => 
+                      s.status === SaleStatus.ESTORNADO && 
+                      s.refunded_at && 
+                      (now - new Date(s.refunded_at).getTime()) < H24
+                    );
+                    if (recentRefunds.length === 0) return null;
+
+                    return (
+                      <div className="bg-white rounded-3xl shadow-sm border border-red-100 overflow-hidden">
+                        <div className="p-6 border-b border-red-100 bg-red-50">
+                          <h4 className="font-bold text-red-700 text-sm flex items-center gap-2">
+                            🔴 Vendas Estornadas — últimas 24h
+                            <span className="text-xs font-normal text-red-400">(após 24h desaparece daqui)</span>
+                          </h4>
+                        </div>
+                        <div className="divide-y divide-red-50">
+                          {recentRefunds.map(sale => {
+                            const vendor = users.find(u => u.id === sale.vendedor_id);
+                            const timeAgo = Math.round((now - new Date(sale.refunded_at!).getTime()) / (60 * 1000));
+                            const hoursAgo = Math.floor(timeAgo / 60);
+                            const minsAgo = timeAgo % 60;
+                            const timeLabel = hoursAgo > 0 ? `${hoursAgo}h${minsAgo}min atrás` : `${minsAgo}min atrás`;
+                            
+                            return (
+                              <div key={sale.id} className="px-6 py-4 flex items-center justify-between gap-4">
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-sm font-bold text-zinc-900 line-through">{sale.phone}</span>
+                                    <span className="px-2 py-0.5 bg-red-100 rounded-full text-[10px] font-bold text-red-600 uppercase">Estornado</span>
+                                    <span className="text-xs text-zinc-400">{timeLabel}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="text-xs text-zinc-500 line-through">{sale.service}</span>
+                                    <span className="text-xs text-zinc-400">•</span>
+                                    <span className="text-xs text-zinc-500 line-through">R$ {sale.value.toLocaleString()}</span>
+                                    <span className="text-xs text-zinc-400">•</span>
+                                    <span className="text-xs text-zinc-500">{vendor?.name || 'Desconhecido'}</span>
+                                  </div>
+                                  <p className="text-xs text-red-500 mt-1">Motivo: {sale.refund_reason || '—'}</p>
+                                </div>
+                                <button
+                                  onClick={async () => {
+                                    if (!confirm('Desfazer estorno? A venda voltará para PAGO e a comissão será recalculada.')) return;
+                                    try {
+                                      await updateDoc(doc(db, 'sales', sale.id), {
+                                        status: SaleStatus.PAGO,
+                                        refund_reason: deleteField(),
+                                        refunded_at: deleteField(),
+                                        updated_at: new Date().toISOString(),
+                                      });
+                                      await addLog(currentUser!, `Estorno desfeito: venda ${sale.phone} (${sale.service}) voltou para PAGO`, sale.id);
+                                      showToast('Estorno desfeito! Venda restaurada.', 'success');
+                                    } catch (err) {
+                                      console.error(err);
+                                      alert('Erro ao desfazer estorno.');
+                                    }
+                                  }}
+                                  className="px-4 py-2 bg-amber-50 text-amber-600 rounded-xl text-xs font-bold hover:bg-amber-100 transition-colors shrink-0"
+                                >
+                                  ↩ Desfazer
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Total Paid per Vendor */}
                   {payments.length > 0 && (() => {
                     const paidByVendor = payments
