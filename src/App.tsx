@@ -4694,14 +4694,31 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <StatCard title="Total Vendido (Período)" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end)).reduce((acc, s) => acc + s.value, 0).toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
-                    <StatCard title="Comissões a Pagar" value={`R$ ${sales.filter(s => isSaleRevenueApproved(s) && !s.commission_paid).reduce((acc, s) => {
+                  {(() => {
+                    const periodApprovedSales = sales.filter(s => isSaleRevenueApproved(s) && (!dateRange.start || toLocalDateString(s.paid_at || '') >= dateRange.start) && (!dateRange.end || toLocalDateString(s.paid_at || '') <= dateRange.end));
+                    const totalVendido = periodApprovedSales.reduce((acc, s) => acc + s.value, 0);
+                    const totalComissoes = periodApprovedSales.reduce((acc, s) => {
                       const v = users.find(u => u.id === s.vendedor_id);
                       return acc + calculateCommission(s, v, acceleratedSaleIds);
-                    }, 0).toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
-                    <StatCard title="Total Pago (Período)" value={`R$ ${payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).reduce((acc, p) => acc + p.amount, 0).toLocaleString()}`} icon={CheckCircle} color="bg-emerald-500" />
-                  </div>
+                    }, 0);
+                    const comissoesPendentes = sales.filter(s => isSaleRevenueApproved(s) && !s.commission_paid).reduce((acc, s) => {
+                      const v = users.find(u => u.id === s.vendedor_id);
+                      return acc + calculateCommission(s, v, acceleratedSaleIds);
+                    }, 0);
+                    const lucro = totalVendido - totalComissoes;
+                    const totalPago = payments.filter(p => (!dateRange.start || toLocalDateString(p.created_at) >= dateRange.start) && (!dateRange.end || toLocalDateString(p.created_at) <= dateRange.end)).reduce((acc, p) => acc + p.amount, 0);
+
+                    return (
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                          <StatCard title="Total Vendido (Período)" value={`R$ ${totalVendido.toLocaleString()}`} icon={PieChart} color="bg-indigo-600" />
+                          <StatCard title="Comissões a Pagar" value={`R$ ${comissoesPendentes.toLocaleString()}`} icon={DollarSign} color="bg-amber-500" />
+                          <StatCard title="Total Pago (Período)" value={`R$ ${totalPago.toLocaleString()}`} icon={CheckCircle} color="bg-emerald-500" />
+                          <StatCard title="💰 Seu Lucro (Período)" value={`R$ ${lucro.toLocaleString()}`} icon={TrendingUp} color="bg-green-700" />
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Pending Commissions Accordion */}
                   {(() => {
