@@ -2639,29 +2639,27 @@ export default function App() {
                         {orphanCustomers === null ? (
                           <button
                             onClick={() => {
-                              const customerIdsWithPaidSales = new Set(
-                                sales.filter(s => s.status === SaleStatus.PAGO).map(s => s.customer_id).filter(Boolean)
-                              );
-                              const orphans = customers.filter(c => !c.deleted_at && !customerIdsWithPaidSales.has(c.id));
+                              const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+                              const orphans = customers.filter(c => !c.deleted_at && c.created_at < cutoff);
                               setOrphanCustomers({ count: orphans.length, ids: orphans.map(c => c.id) });
                             }}
                             className="px-4 py-2 bg-zinc-100 text-zinc-600 rounded-xl text-xs font-bold hover:bg-zinc-200 transition-colors flex items-center gap-1.5"
                           >
-                            🔍 Analisar clientes sem vendas
+                            🔍 Analisar clientes +7 dias
                           </button>
                         ) : orphanCustomers.count === 0 ? (
                           <div className="flex items-center gap-2">
-                            <span className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-xl text-xs font-bold">✅ Todos os clientes têm vendas!</span>
+                            <span className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-xl text-xs font-bold">✅ Nenhum cliente com mais de 7 dias!</span>
                             <button onClick={() => setOrphanCustomers(null)} className="text-xs text-zinc-400 hover:text-zinc-600">✕</button>
                           </div>
                         ) : !isDeletingOrphans ? (
                           <div className="flex items-center gap-2">
                             <span className="px-4 py-2 bg-amber-100 text-amber-700 rounded-xl text-xs font-bold">
-                              ⚠️ {orphanCustomers.count} cliente(s) sem nenhuma venda
+                              ⚠️ {orphanCustomers.count} cliente(s) com mais de 7 dias
                             </span>
                             <button
                               onClick={async () => {
-                                if (!confirm(`Tem certeza que deseja deletar ${orphanCustomers.count} clientes sem vendas? Esta ação não pode ser desfeita.`)) return;
+                                if (!confirm(`Tem certeza que deseja deletar ${orphanCustomers.count} clientes com mais de 7 dias? Isso NÃO afeta vendas nem comissões.`)) return;
                                 setIsDeletingOrphans(true);
                                 try {
                                   let deleted = 0;
@@ -2675,7 +2673,7 @@ export default function App() {
                                     await batch.commit();
                                     deleted += chunk.length;
                                   }
-                                  await addLog(currentUser!, `Limpeza: ${deleted} clientes sem vendas removidos`, '');
+                                  await addLog(currentUser!, `Limpeza: ${deleted} clientes com +7 dias removidos`, '');
                                   setOrphanCustomers(null);
                                   alert(`${deleted} clientes removidos com sucesso!`);
                                 } catch (err) {
