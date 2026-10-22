@@ -2267,31 +2267,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* Cleanup Reminder Banner (every 7 days) */}
-        {currentUser.role === UserRole.ADMIN && currentPage === 'dashboard' && (() => {
-          const daysSince = lastCleanupDate ? Math.floor((Date.now() - new Date(lastCleanupDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
-          return daysSince >= 7 ? (
-            <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mx-4 mt-2 rounded-md shadow-sm flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-amber-600" />
-                <p className="text-sm text-amber-800 font-medium">
-                  🧹 Limpeza de dados recomendada {daysSince === 999 ? '(nunca realizada)' : `(${daysSince} dias atrás)`}. Vá em <strong>Logs</strong> para limpar comprovantes e logs antigos.
-                </p>
-              </div>
-              <button 
-                onClick={async () => {
-                  const now = new Date().toISOString();
-                  await setDoc(doc(db, 'settings', 'cleanup'), { lastCleanupDate: now });
-                  setLastCleanupDate(now);
-                }}
-                className="text-xs font-bold text-amber-700 bg-amber-100 hover:bg-amber-200 px-3 py-1 rounded-lg transition-colors whitespace-nowrap"
-              >
-                OK, Entendi
-              </button>
-            </div>
-          ) : null;
-        })()}
-
         {/* Sync Error Banner */}
         {syncError && (
           <div className="bg-red-50 border-l-4 border-red-500 p-4 m-4 rounded-md shadow-sm">
