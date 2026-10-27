@@ -464,8 +464,18 @@ export default function App() {
     };
 
     if (isAdminOrManager) {
-      const salesQ = query(collection(db, 'sales'), orderBy('created_at', 'desc'));
-      const receiptsQ = query(collection(db, 'receipts'), orderBy('created_at', 'desc'));
+      // Priority load: fetch today's sales first for instant dashboard
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayQ = query(collection(db, 'sales'), where('created_at', '>=', todayStart.toISOString()));
+      getDocs(todayQ).then(snapshot => {
+        const todaySales = snapshot.docs.map(d => ({ ...(d.data() as Sale), id: d.id }));
+        if (todaySales.length > 0) setSales(prev => prev.length === 0 ? sortSales(todaySales) : prev);
+      }).catch(() => {});
+
+      // Then load ALL sales via real-time listener
+      const salesQ = query(collection(db, 'sales'));
+      const receiptsQ = query(collection(db, 'receipts'));
       
       unsubSales = onSnapshot(salesQ, (snapshot) => {
         const salesData = snapshot.docs.map(doc => ({ ...(doc.data() as Sale), id: doc.id }));
